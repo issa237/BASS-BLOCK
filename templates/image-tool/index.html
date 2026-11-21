@@ -1,0 +1,34 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Image Adjust</title>
+    <link rel="stylesheet" href="style.css" />
+  </head>
+  <body>
+    <div class="app">
+      <section id="stage" class="stage">
+        <canvas id="canvas" hidden></canvas>
+        <div id="drop" class="drop">
+          <p><strong>Drop an image here</strong></p>
+          <p class="muted">or</p>
+          <button id="open" class="btn primary">Open image…</button>
+        </div>
+      </section>
+      <aside class="panel">
+        <h2>Adjust</h2>
+        <label>Brightness <output id="o-brightness">100%</output><input id="brightness" type="range" min="0" max="200" value="100" /></label>
+        <label>Contrast <output id="o-contrast">100%</output><input id="contrast" type="range" min="0" max="200" value="100" /></label>
+        <label>Saturation <output id="o-saturate">100%</output><input id="saturate" type="range" min="0" max="300" value="100" /></label>
+        <label>Grayscale <output id="o-grayscale">0%</output><input id="grayscale" type="range" min="0" max="100" value="0" /></label>
+        <label>Blur <output id="o-blur">0px</output><input id="blur" type="range" min="0" max="20" value="0" /></label>
+        <div class="row">
+          <button id="reset" class="btn">Reset</button>
+          <button id="export" class="btn primary" disabled>Export PNG…</button>
+        </div>
+        <p id="meta" class="muted"></p>
+      </aside>
+    </div>
+    <script type="module" src="main.js"></script>
+  </body>
+</html>

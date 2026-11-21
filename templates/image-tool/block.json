@@ -1,0 +1,14 @@
+{
+  "schema": 1,
+  "id": "image-tool",
+  "name": "Image Adjust",
+  "description": "Open or drop an image, adjust brightness, contrast and saturation, export a PNG.",
+  "icon": "🖼️",
+  "version": "0.1.0",
+  "mode": "web",
+  "sdk": "^1.0",
+  "entry": { "ui": "index.html" },
+  "permissions": { "fs": "user-picked-files", "network": false, "clipboard": false },
+  "io": { "inputs": [], "outputs": [] },
+  "platform": { "os": "macos", "arch": ["arm64", "x64"] }
+}

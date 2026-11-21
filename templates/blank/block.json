@@ -1,0 +1,14 @@
+{
+  "schema": 1,
+  "id": "blank",
+  "name": "New block",
+  "description": "A starter block.",
+  "icon": "🧱",
+  "version": "0.1.0",
+  "mode": "web",
+  "sdk": "^1.0",
+  "entry": { "ui": "index.html" },
+  "permissions": { "fs": "none", "network": false, "clipboard": false },
+  "io": { "inputs": [], "outputs": [] },
+  "platform": { "os": "macos", "arch": ["arm64", "x64"] }
+}

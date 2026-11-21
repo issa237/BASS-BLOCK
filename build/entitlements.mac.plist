@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Hardened Runtime exceptions BASS BLOCK needs (required for notarization).
+  - allow-jit / allow-unsigned-executable-memory: V8 (JavaScript engine) generates machine code at runtime.
+  - disable-library-validation: Electron loads its own frameworks/helpers.
+  - allow-dyld-environment-variables: the app re-launches itself with ELECTRON_RUN_AS_NODE for the bassblock CLI.
+  Not sandboxed (com.apple.security.app-sandbox is absent): BASS BLOCK must start agent CLIs and helper processes.
+-->
+<plist version="1.0">
+  <dict>
+    <key>com.apple.security.cs.allow-jit</key>
+    <true/>
+    <key>com.apple.security.cs.allow-unsigned-executable-memory</key>
+    <true/>
+    <key>com.apple.security.cs.disable-library-validation</key>
+    <true/>
+    <key>com.apple.security.cs.allow-dyld-environment-variables</key>
+    <true/>
+  </dict>
+</plist>

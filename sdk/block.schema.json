@@ -1,0 +1,94 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://bassblock.local/schema/block.v1.json",
+  "title": "BASS BLOCK block manifest (schema 1)",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "id", "name", "version", "mode", "sdk", "entry"],
+  "properties": {
+    "$schema": { "type": "string" },
+    "schema": { "const": 1 },
+    "id": {
+      "type": "string",
+      "pattern": "^[a-z0-9][a-z0-9-]{1,47}$",
+      "description": "Stable identifier. Lowercase letters, digits and dashes. Must match the block's folder name."
+    },
+    "name": { "type": "string", "minLength": 1, "maxLength": 60 },
+    "description": { "type": "string", "maxLength": 400 },
+    "icon": { "type": "string", "maxLength": 8, "description": "One emoji shown on the block tile." },
+    "version": { "type": "string", "pattern": "^\\d+\\.\\d+\\.\\d+$" },
+    "mode": {
+      "enum": ["web"],
+      "description": "Only 'web' (HTML/CSS/JS UI in a sandboxed view) is supported in this host version."
+    },
+    "sdk": { "type": "string", "pattern": "^\\^?1(\\.\\d+){0,2}$", "description": "SDK range, e.g. ^1.0" },
+    "entry": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["ui"],
+      "properties": {
+        "ui": { "type": "string", "pattern": "^[A-Za-z0-9_./-]+\\.html$" }
+      }
+    },
+    "backend": {
+      "description": "Reserved for Mode 2 (polyglot backends). Not supported by this host version yet."
+    },
+    "permissions": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "fs": { "enum": ["none", "user-picked-files"], "default": "none" },
+        "network": {
+          "oneOf": [
+            { "type": "boolean" },
+            {
+              "type": "array",
+              "items": { "type": "string", "pattern": "^[a-z0-9.-]+$" },
+              "maxItems": 20
+            }
+          ],
+          "default": false
+        },
+        "clipboard": { "type": "boolean", "default": false }
+      }
+    },
+    "io": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "inputs": { "$ref": "#/definitions/ports" },
+        "outputs": { "$ref": "#/definitions/ports" }
+      }
+    },
+    "platform": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "os": { "const": "macos" },
+        "arch": { "type": "array", "items": { "enum": ["arm64", "x64"] } }
+      }
+    },
+    "limits": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "memoryMb": { "type": "integer", "minimum": 64, "maximum": 16384 }
+      }
+    }
+  },
+  "definitions": {
+    "ports": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["name", "type"],
+        "properties": {
+          "name": { "type": "string", "pattern": "^[a-z][a-zA-Z0-9_-]{0,31}$" },
+          "type": { "type": "string", "pattern": "^[a-z]+/[a-zA-Z0-9.+-]+$" },
+          "description": { "type": "string" }
+        }
+      }
+    }
+  }
+}

@@ -1,0 +1,69 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'" />
+    <title>BASS BLOCK</title>
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <aside id="sidebar">
+      <div class="traffic-space drag"></div>
+      <div class="brand drag">
+        <svg class="logo" viewBox="0 0 32 32" aria-hidden="true">
+          <rect x="3" y="15" width="12" height="12" rx="3" class="l1" />
+          <rect x="17" y="15" width="12" height="12" rx="3" class="l2" />
+          <rect x="10" y="3" width="12" height="12" rx="3" class="l3" />
+        </svg>
+        <span>BASS BLOCK</span>
+      </div>
+      <nav class="nav">
+        <button class="nav-item" data-nav="home" id="nav-home">
+          <svg viewBox="0 0 20 20"><path d="M3 3h6v6H3zM11 3h6v6h-6zM3 11h6v6H3zM11 11h6v6h-6z" /></svg>
+          All blocks
+        </button>
+        <button class="nav-item" id="nav-new">
+          <svg viewBox="0 0 20 20"><path d="M10 4v12M4 10h12" /></svg>
+          New block
+        </button>
+      </nav>
+      <section class="side-section">
+        <h6>Open</h6>
+        <ul id="open-list" class="side-list"></ul>
+        <p class="side-empty" id="open-empty">No blocks open</p>
+      </section>
+      <section class="side-section grow">
+        <h6>Library</h6>
+        <ul id="block-list" class="side-list"></ul>
+      </section>
+      <footer class="side-footer">
+        <button id="btn-settings" class="nav-item">
+          <svg viewBox="0 0 20 20"><circle cx="10" cy="10" r="2.6" /><path d="M10 2.5v2.2M10 15.3v2.2M2.5 10h2.2M15.3 10h2.2M4.7 4.7l1.6 1.6M13.7 13.7l1.6 1.6M4.7 15.3l1.6-1.6M13.7 6.3l1.6-1.6" /></svg>
+          <span>AI settings</span>
+          <span class="agent-pill" id="agent-pill">—</span>
+        </button>
+      </footer>
+    </aside>
+
+    <main id="main">
+      <header id="topbar" class="drag"></header>
+      <section id="home-view" class="view"></section>
+      <section id="block-view" class="view" hidden>
+        <div id="block-viewport"></div>
+        <div id="log-drawer" hidden>
+          <div class="log-head">
+            <strong>Console</strong>
+            <span class="spacer"></span>
+            <button class="btn ghost small" id="log-clear">Clear</button>
+            <button class="btn ghost small" id="log-close">Close</button>
+          </div>
+          <ol id="log-list"></ol>
+        </div>
+      </section>
+    </main>
+
+    <div id="modal-root"></div>
+    <div id="toast-root" aria-live="polite"></div>
+    <script src="app.js"></script>
+  </body>
+</html>

@@ -1,0 +1,13 @@
+:root { color-scheme: light dark; --bg: #eceae6; --text: #1c1a17; --muted: #6b655c; --accent: #e8661c; --glass: rgba(255,255,255,.75); --border: rgba(0,0,0,.1); }
+@media (prefers-color-scheme: dark) { :root { --bg: #151412; --text: #f2efe9; --muted: #a39d93; --accent: #ff8a3d; --glass: rgba(30,29,26,.75); --border: rgba(255,255,255,.1); } }
+html, body { margin: 0; height: 100%; overflow: hidden; background: var(--bg); color: var(--text); font: 13px/1.4 -apple-system, BlinkMacSystemFont, sans-serif; }
+#view { position: fixed; inset: 0; }
+#view canvas { display: block; cursor: grab; }
+#view canvas:active { cursor: grabbing; }
+.hud { position: fixed; top: 12px; left: 12px; display: flex; align-items: center; gap: 8px; padding: 6px 8px; border-radius: 10px; background: var(--glass); backdrop-filter: blur(12px); border: 1px solid var(--border); }
+.btn { padding: 4px 10px; border-radius: 7px; border: 1px solid var(--border); background: transparent; color: inherit; font: inherit; }
+.btn:hover { border-color: var(--accent); color: var(--accent); }
+.toggle { display: flex; align-items: center; gap: 4px; }
+.toggle input { accent-color: var(--accent); }
+.muted { color: var(--muted); padding: 0 4px; }
+body.over #view { outline: 2px dashed var(--accent); outline-offset: -10px; }

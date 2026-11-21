@@ -1,0 +1,17 @@
+{
+  "schema": 1,
+  "id": "text-tool",
+  "name": "Markdown + Word Stats",
+  "description": "Markdown editor with live word-frequency stats. Autosaves; opens and saves .md files.",
+  "icon": "📝",
+  "version": "0.1.0",
+  "mode": "web",
+  "sdk": "^1.0",
+  "entry": { "ui": "index.html" },
+  "permissions": { "fs": "user-picked-files", "network": false, "clipboard": false },
+  "io": {
+    "inputs": [{ "name": "text", "type": "text/markdown", "description": "Replace the document text" }],
+    "outputs": [{ "name": "stats", "type": "application/json", "description": "Word count and top words, on every edit" }]
+  },
+  "platform": { "os": "macos", "arch": ["arm64", "x64"] }
+}

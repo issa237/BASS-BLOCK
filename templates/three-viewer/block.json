@@ -1,0 +1,14 @@
+{
+  "schema": 1,
+  "id": "three-viewer",
+  "name": "STL Viewer",
+  "description": "3D viewer for STL models: open or drop a file, orbit, zoom and inspect.",
+  "icon": "🧊",
+  "version": "0.1.0",
+  "mode": "web",
+  "sdk": "^1.0",
+  "entry": { "ui": "index.html" },
+  "permissions": { "fs": "user-picked-files", "network": false, "clipboard": false },
+  "io": { "inputs": [], "outputs": [] },
+  "platform": { "os": "macos", "arch": ["arm64", "x64"] }
+}

@@ -1,0 +1,95 @@
+{
+  "name": "bassblock",
+  "productName": "BASS BLOCK",
+  "version": "0.1.0",
+  "description": "BASS BLOCK: one macOS host app for AI-generated software blocks",
+  "private": true,
+  "main": "dist/main.js",
+  "bin": {
+    "bassblock": "dist/cli.js"
+  },
+  "scripts": {
+    "build": "node scripts/build.mjs",
+    "typecheck": "tsc --noEmit",
+    "start": "npm run build && electron .",
+    "test": "npm run build && node scripts/smoke-test.mjs",
+    "icons": "electron scripts/make-icon.cjs",
+    "pack": "npm run build && electron-builder --mac dir --arm64 -c.mac.identity=-",
+    "dist": "npm run build && electron-builder --mac --arm64 -c.mac.identity=-",
+    "dist:release": "npm run build && electron-builder --mac --arm64 --x64 -c.mac.notarize=true"
+  },
+  "devDependencies": {
+    "@types/node": "26.6.6",
+    "ajv": "8.20.0",
+    "electron": "45.4.1",
+    "electron-builder": "26.18.0",
+    "esbuild": "0.28.2",
+    "three": "0.187.0",
+    "typescript": "7.0.2"
+  },
+  "allowScripts": {
+    "electron@45.4.1": true
+  },
+  "author": "BASS BLOCK",
+  "build": {
+    "appId": "com.bassblock.app",
+    "productName": "BASS BLOCK",
+    "copyright": "Copyright © 2026 BASS BLOCK",
+    "directories": {
+      "output": "release",
+      "buildResources": "build"
+    },
+    "files": [
+      "dist/**/*",
+      "!dist/**/*.map",
+      "package.json"
+    ],
+    "extraResources": [
+      {
+        "from": "templates",
+        "to": "templates"
+      },
+      {
+        "from": "sdk",
+        "to": "sdk"
+      }
+    ],
+    "asar": true,
+    "mac": {
+      "category": "public.app-category.developer-tools",
+      "icon": "build/icon.png",
+      "target": [
+        "dmg",
+        "zip"
+      ],
+      "hardenedRuntime": true,
+      "gatekeeperAssess": false,
+      "entitlements": "build/entitlements.mac.plist",
+      "entitlementsInherit": "build/entitlements.mac.plist",
+      "minimumSystemVersion": "12.0",
+      "artifactName": "BASS-BLOCK-${version}-${arch}.${ext}"
+    },
+    "dmg": {
+      "title": "BASS BLOCK ${version}",
+      "background": "build/dmg-background.png",
+      "iconSize": 112,
+      "window": {
+        "width": 640,
+        "height": 400
+      },
+      "contents": [
+        {
+          "x": 170,
+          "y": 200,
+          "type": "file"
+        },
+        {
+          "x": 470,
+          "y": 200,
+          "type": "link",
+          "path": "/Applications"
+        }
+      ]
+    }
+  }
+}

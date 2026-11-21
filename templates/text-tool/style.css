@@ -1,0 +1,28 @@
+:root {
+  color-scheme: light dark;
+  --bg: #ffffff; --panel: #f6f5f3; --text: #1c1a17; --muted: #6b655c; --accent: #e8661c; --border: rgba(0,0,0,.1);
+}
+@media (prefers-color-scheme: dark) {
+  :root { --bg: #1c1b18; --panel: #22211e; --text: #f2efe9; --muted: #a39d93; --accent: #ff8a3d; --border: rgba(255,255,255,.1); }
+}
+* { box-sizing: border-box; }
+html, body { margin: 0; height: 100%; }
+body { display: flex; flex-direction: column; background: var(--bg); color: var(--text); font: 14px/1.5 -apple-system, BlinkMacSystemFont, sans-serif; }
+.bar { display: flex; align-items: center; gap: 8px; padding: 8px 12px; border-bottom: 1px solid var(--border); }
+.spacer { flex: 1; }
+.muted { color: var(--muted); font-size: 12px; }
+.small { font-size: 11.5px; }
+.btn { padding: 4px 11px; border-radius: 7px; border: 1px solid var(--border); background: var(--bg); color: inherit; font: inherit; font-size: 13px; }
+.btn:hover { border-color: var(--accent); color: var(--accent); }
+.split { flex: 1; display: flex; min-height: 0; }
+#editor { flex: 1; resize: none; border: 0; outline: none; padding: 28px 36px; background: var(--bg); color: var(--text); font: 15px/1.7 ui-monospace, "SF Mono", Menlo, monospace; }
+.stats { width: 280px; flex: none; padding: 20px; background: var(--panel); border-left: 1px solid var(--border); overflow-y: auto; }
+.kpis { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; margin-bottom: 18px; }
+.kpis div { display: flex; flex-direction: column; }
+.kpis b { font-size: 20px; font-variant-numeric: tabular-nums; letter-spacing: -0.02em; }
+.kpis span { font-size: 11px; color: var(--muted); }
+h2 { font-size: 12px; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); margin: 0 0 8px; }
+#top { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 5px; }
+#top li { display: grid; grid-template-columns: 1fr auto; gap: 2px 8px; font-size: 13px; }
+#top .bar-fill { grid-column: 1 / -1; height: 4px; border-radius: 2px; background: var(--accent); opacity: .75; }
+#top .n { color: var(--muted); font-variant-numeric: tabular-nums; }
