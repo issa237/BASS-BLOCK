@@ -1,28 +1,39 @@
 ---
 name: bass-block-builder
-description: Build or modify a BASS BLOCK block — a sandboxed mini-app (HTML/CSS/JS + the bb SDK) that runs inside the BASS BLOCK macOS host. Use when asked to create, change or fix a block, or when working in a folder that contains a block.json with "schema": 1.
+description: Build or modify a BASS BLOCK block — a sandboxed mini-app (Web UI + optional Polyglot Backend in Python, Swift, Rust, C++, Go, or Node.js) that runs inside the BASS BLOCK host. Use when asked to create, change or fix a block, or when working in a folder that contains a block.json with "schema": 1.
 ---
 
 # Building BASS BLOCK blocks
 
-A **block** is a small, focused app that runs inside BASS BLOCK in its own sandboxed web view.
-You write plain HTML, CSS and JavaScript. The page talks to the outside world only through the
-global `bb` object (the BASS BLOCK SDK). There is no Node.js, no npm at runtime, no internet,
-and no access to files the user didn't pick.
+A **block** is a focused app that runs inside BASS BLOCK in its own sandboxed view.
+Every block has an HTML/CSS/JS (or TypeScript `.ts`) UI that talks to the host through the global `bb` object (the BASS BLOCK SDK).
+For tasks that benefit from another programming language (data science, AI/ML, video/audio processing, native macOS APIs, heavy 3D/game compute), a block can run in **`"mode": "polyglot"`** with a supervised local backend in **Python, Swift, Rust, C++, Go, or Node.js**.
+
+## Choosing the Best Mode & Language
+
+Pick the mode and language that best fits the user's request (and matches the runtimes installed on the machine; run `bassblock runtimes` to check):
+
+| Domain / Task | Recommended Mode & Language | Why |
+| :--- | :--- | :--- |
+| Text editors, Markdown, JSON/diff, timers, 2D canvas, sprite tools | `"mode": "web"` (JS / TypeScript `.ts` + HTML/CSS) | Instant startup, zero backend process needed |
+| 3D viewers, STL/OBJ/glTF inspection, shaders, WebGL games | `"mode": "web"` + vendored `three.min.js` (copy from `three-viewer`) | Full GPU WebGL acceleration inside the view |
+| Data analysis, CSV/Excel/PDF, AI/ML, image/video/audio processing (FFmpeg) | `"mode": "polyglot"` with **Python** (`"language": "python"`) | Direct access to Python standard library, statistics, file/media tools |
+| High-speed native compute, macOS native APIs (Vision, CryptoKit, Metal, CoreAudio) | `"mode": "polyglot"` with **Swift** (`"language": "swift"`) | Compiled native binary (`swiftc -O`), maximum speed on macOS |
+| Systems tools, simulations, fast parsers, concurrency | `"mode": "polyglot"` with **Rust**, **C++**, **Go**, or **Node.js** | Compiled or concurrent local backend via `bb.backend.call` |
 
 ## Workflow
 
 1. Read `block.json` and the existing files first. When editing, keep features and saved-data formats working.
-2. Write the block (rules below). Keep it in a few files: `index.html`, `style.css`, `main.js`, plus any modules or vendored libraries.
-3. Run `bassblock validate`. It checks the manifest, scans files, launches the block headless in the real
-   sandbox, and reports console errors, blocked requests and empty renders.
+2. Write the block (rules below). Keep the UI clean (`index.html`, `style.css`, `main.js` or `main.ts`) and put backend code (if `mode` is `"polyglot"`) in `backend/`.
+3. Run `bassblock validate`. It checks the manifest, scans files, compiles & starts the backend (if `"polyglot"`), launches the UI headless in the real sandbox, and reports errors or empty renders.
 4. Fix every reported problem and run `bassblock validate` again until it prints `✓ … passed validation`.
 5. Finish with a one or two sentence summary for the user.
 
-Only edit files inside the block's folder. Don't create `data/`, `.meta/` or `.git` content: the host owns them.
+Only edit files inside the block's `code/` folder. Don't create `data/`, `.meta/` or `.git` content: the host owns them.
 
 ## block.json (schema 1)
 
+### Web Block (`"mode": "web"`)
 ```json
 {
   "schema": 1,
@@ -39,36 +50,85 @@ Only edit files inside the block's folder. Don't create `data/`, `.meta/` or `.g
     "inputs":  [{ "name": "text",  "type": "text/markdown" }],
     "outputs": [{ "name": "stats", "type": "application/json" }]
   },
-  "platform": { "os": "macos", "arch": ["arm64", "x64"] }
+  "platform": { "os": "any", "arch": ["arm64", "x64"] }
 }
 ```
 
+### Polyglot Block (`"mode": "polyglot"`)
+```json
+{
+  "schema": 1,
+  "id": "py-analyzer",
+  "name": "Python Data Analyzer",
+  "description": "Analyzes datasets with a local Python 3 backend.",
+  "icon": "🐍",
+  "version": "0.1.0",
+  "mode": "polyglot",
+  "sdk": "^1.0",
+  "entry": { "ui": "index.html" },
+  "backend": {
+    "language": "python",
+    "protocol": "stdio",
+    "run": ["python3", "-u", "backend/main.py"]
+  },
+  "permissions": { "fs": "user-picked-files", "network": false, "clipboard": false }
+}
+```
+
+For compiled backends (Swift, Rust, C++, Go), add `"build"` so BASS BLOCK compiles the binary into `.bin/` automatically (and caches it until source files change):
+- **Swift**: `"build": ["swiftc", "-O", "backend/main.swift", "-o", ".bin/server"]`, `"run": [".bin/server"]`
+- **C++**: `"build": ["clang++", "-O2", "-std=c++20", "backend/main.cpp", "-o", ".bin/server"]`, `"run": [".bin/server"]`
+- **Go**: `"build": ["go", "build", "-o", ".bin/server", "backend/main.go"]`, `"run": [".bin/server"]`
+- **Rust**: `"build": ["rustc", "-O", "backend/main.rs", "-o", ".bin/server"]`, `"run": [".bin/server"]`
+- **Node.js**: `"run": ["node", "backend/main.js"]`
+
+### Manifest Rules
 - `id` must stay exactly as given (it matches the folder). Never change it.
-- `mode` must be `"web"`. `backend` is not supported yet: do all work in the page (JS, WebAssembly, Web Workers, WebGL, Web Audio, Canvas all work).
 - Bump `version` (patch) whenever you change a block.
 - **Permissions: declare the minimum.** The user approves them before the block opens, and is asked again if they change.
-  - `"fs": "user-picked-files"`: needed for `bb.fs.*` (open/save dialogs). Drag-and-drop of files into the page needs no permission.
+  - `"fs": "user-picked-files"`: needed for `bb.fs.*` (open/save files and directory pickers). Drag-and-drop of files into the page needs no permission.
   - `"network"`: `false` (default), or a list of hostnames like `["api.github.com"]`, or `true` for any HTTPS host. Only needed for `bb.net.fetch`.
   - `"clipboard": true`: needed for `bb.clipboard.*`.
-- `io` describes events this block sends (`outputs`, via `bb.emit`) and accepts (`inputs`, via `bb.on`). Types are MIME-style.
 
-## Hard sandbox rules (validation fails otherwise)
+## Polyglot Backend Protocol (`stdio` and `http`)
 
-- **No remote resources.** No CDN `<script src="https://…">`, no Google Fonts, no remote images, no `import … from "https://…"`.
-  If you need a library, write the code yourself or vendor a small file into the block folder (for example `vendor/lib.js`).
-  `three.js` is available to copy from the `three-viewer` example block (`vendor/three.min.js`).
-- **No inline scripts.** All JS goes in `.js` files loaded with `<script type="module" src="main.js"></script>`.
-  No `onclick="…"` attributes; use `addEventListener`.
+### 1. `"protocol": "stdio"` (Recommended — Zero Dependencies)
+The host spawns `backend.run` with `BB_BLOCK_ID`, `BB_CODE_DIR`, and `BB_DATA_DIR` in its environment.
+When the UI calls `await bb.backend.call("myMethod", { a: 1 })`, the host writes one JSON line to the backend's `stdin`:
+```json
+{"id": 1, "method": "myMethod", "params": {"a": 1}}
+```
+The backend processes it and prints one JSON line to `stdout` (remember to flush `stdout`!):
+```json
+{"id": 1, "result": {"answer": 42}}
+```
+Or on error:
+```json
+{"id": 1, "error": "What went wrong"}
+```
+The backend can also push asynchronous events to the UI at any time by printing:
+```json
+{"event": "progress", "data": {"percent": 75}}
+```
+which the UI receives with `bb.backend.onEvent("progress", (data) => ...)`.
+
+### 2. `"protocol": "http"` (Loopback HTTP Server)
+If `"protocol": "http"` is set, the host assigns a free port in `process.env.BB_PORT` (`os.environ["BB_PORT"]`), waits for `GET http://127.0.0.1:$BB_PORT/health` (or `backend.healthPath`) to respond, and proxies `await bb.backend.fetch("/api/...", { method: "POST", body: ... })` from the UI.
+
+## Hard Sandbox Rules for the UI (Validation Fails Otherwise)
+
+- **No remote sub-resources.** No CDN `<script src="https://…">`, no Google Fonts, no remote `<img src="https://…">`, no `import … from "https://…"`. Normal external clickable links (`<a href="https://…">`) are allowed and open in the user's browser.
+  If you need a JS library, write the code yourself or vendor a small file into the block folder (`vendor/lib.js`). `three.js` is available to copy from the `three-viewer` template (`vendor/three.min.js`).
+- **No inline scripts.** All JS/TS goes in `.js` or `.ts` files loaded with `<script type="module" src="main.js"></script>` (or `main.ts` — BASS BLOCK strips TypeScript types automatically!).
+  No `onclick="…"` attributes in HTML; use `addEventListener`.
 - No `eval` / `new Function`. WebAssembly is allowed.
-- `fetch()` works only for the block's own files (relative URLs). For the internet, use `bb.net.fetch` with a declared permission.
-- Don't use `localStorage`/`IndexedDB` for user data: use `bb.storage` / `bb.data` so data lives in the block's data folder and survives code changes.
-- `alert`, `confirm` and `prompt` are discouraged; build inline UI instead.
-- Popups (`window.open`) and navigating away are blocked. Use one page (or swap views in JS).
+- `fetch()` in the UI works only for the block's own files (relative URLs). For the internet, use `bb.net.fetch` with a declared permission. For a local backend, use `bb.backend.call` or `bb.backend.fetch`.
+- Don't use `localStorage`/`IndexedDB` for user data: use `bb.storage` / `bb.data` so data lives in the block's data folder and survives code changes and AI undo.
 
 ## The bb SDK (global `bb`, all methods async unless noted)
 
 ```js
-await bb.info()                    // { id, name, version, sdk, permissions }
+await bb.info()                    // { id, name, version, mode, backend, sdk, permissions }
 bb.ready()                         // call once your UI is rendered (helps validation)
 bb.log("message", obj)             // shows in the host console panel
 
@@ -78,20 +138,36 @@ await bb.storage.set(key, value)   // JSON-serialisable value
 await bb.storage.delete(key)
 await bb.storage.keys()
 
-// Private files in the block's data folder (any size up to 512 MB each)
+// Private files in the block's data folder (up to 512 MB each)
 await bb.data.write("exports/a.png", uint8ArrayOrString)
 await bb.data.read("exports/a.png")            // → Uint8Array or null
 await bb.data.readText("notes.txt")            // → string or null
 await bb.data.list()                           // → [{ name, size, modified }]
 await bb.data.delete("exports/a.png")
 
-// User-picked files — needs "fs": "user-picked-files"
-const files = await bb.fs.pickOpen({ multiple: false, filters: [{ name: "Images", extensions: ["png", "jpg"] }] })
-// → [{ handle, name, size }]  (empty array if cancelled)
+// User-picked files & folders — needs "fs": "user-picked-files"
+const files = await bb.fs.pickOpen({
+  multiple: false,
+  writable: true,                              // pass writable: true to allow saving back to the same handle!
+  filters: [{ name: "Images", extensions: ["png", "jpg"] }]
+})                                             // → [{ handle, name, size, writable }]
 await bb.fs.read(files[0].handle)              // → Uint8Array
 await bb.fs.readText(files[0].handle)          // → string
+await bb.fs.write(files[0].handle, data)       // works when opened with writable: true or via pickSave()
 const out = await bb.fs.pickSave({ suggestedName: "result.png" })   // → { handle, name } or null
-await bb.fs.write(out.handle, uint8ArrayOrString)                   // only save-handles are writable
+await bb.fs.write(out.handle, uint8ArrayOrString)
+
+// User-picked project directories — needs "fs": "user-picked-files"
+const dir = await bb.fs.pickDirectory({ writable: true })           // → { handle, name, writable } or null
+const entries = await bb.fs.listDir(dir.handle, "subfolder")        // → [{ name, isDirectory, size, modified }]
+const text = await bb.fs.readDirText(dir.handle, "subfolder/a.txt")
+const bytes = await bb.fs.readDirFile(dir.handle, "model.stl")
+await bb.fs.writeDirFile(dir.handle, "output/result.json", "{}")
+
+// Polyglot Backend Bridge — requires "mode": "polyglot" and "backend" in block.json
+const result = await bb.backend.call("analyze", { text: "hello" })  // for "protocol": "stdio"
+const offEvt = bb.backend.onEvent("progress", (data) => {})         // push events from backend
+const resp = await bb.backend.fetch("/api/run", { method: "POST", body: "{}" }) // for "protocol": "http"
 
 // Clipboard — needs "clipboard": true
 await bb.clipboard.readText()
@@ -101,40 +177,29 @@ await bb.clipboard.writeText("hi")
 const res = await bb.net.fetch("https://api.example.com/x", { method: "GET", headers: {} })
 res.status; res.ok; res.headers; res.text(); res.json(); res.bytes()   // (these three are sync)
 
-// Events between open blocks
+// Events between open blocks (works great with Split View!)
 bb.emit("stats", { words: 120 })                 // to every other open block
 const off = bb.on("text", (data, { from }) => {})  // returns an unsubscribe function
 ```
 
-Binary data crosses the bridge as `Uint8Array`. To get an image from bytes: `createImageBitmap(new Blob([bytes]))`.
-To save a canvas: `new Uint8Array(await (await new Promise(r => canvas.toBlob(r, "image/png"))).arrayBuffer())`.
-
-Top-level `await` works in module scripts. Load saved state on start, save after each change (debounce typing).
-
-## Quality bar
-
-- It must do what the user asked, completely. No placeholders, no "TODO", no lorem ipsum.
-- Look like a polished macOS utility: system font (`-apple-system`), comfortable spacing, a clear primary action,
-  sensible empty state, and support for both light and dark mode via `prefers-color-scheme`.
-- Fill the view: the block gets the whole content area of the window and should be resizable without breaking.
-- Handle errors visibly (inline message), not only in the console.
-- Persist the user's work and settings with `bb.storage` / `bb.data` so reopening the block restores it.
-- Keep it fast: no huge dependencies; vendor only what you need.
-
 ## Example blocks
 
-Look at the example blocks for working patterns before writing your own:
-- `blank`: minimal starter with `bb.storage`
-- `text-tool`: editor + live stats, autosave, open/save files, emits `stats`, accepts `text`
+Look at the templates for working patterns before writing your own:
+- `blank`: minimal web starter with `bb.storage`
+- `text-tool`: markdown editor + live stats, autosave, writable open/save files, emits `stats`, accepts `text`
 - `image-tool`: open/drop an image, canvas filters, export PNG
-- `three-viewer`: three.js scene, STL parsing, custom orbit controls, drag-and-drop
+- `three-viewer`: three.js 3D scene, STL parsing, orbit controls, drag-and-drop
+- `python-tool`: polyglot Python 3 `stdio` JSON-RPC backend + data analysis UI
+- `swift-tool`: polyglot compiled native Swift `stdio` JSON-RPC backend + benchmark/hash UI
 
 ## CLI reference
 
 ```
 bassblock validate [dir|id] [--json]   validate (run it from the block folder with no args)
-bassblock create <id> --template text-tool --name "Name"
-bassblock run <id>                      open it in the BASS BLOCK app
-bassblock reload <id>                   reload it if it's open
-bassblock docs | schema                 print this guide | the block.json JSON Schema
+bassblock create <id> --template blank|text-tool|image-tool|three-viewer|python-tool|swift-tool --name "Name"
+bassblock run <id>                     open it in the BASS BLOCK app
+bassblock reload <id>                  reload it if it's open
+bassblock runtimes [--json]            list compilers & language runtimes installed on this machine
+bassblock install-skill                install the bass-block-builder skill & CLI for Antigravity/Claude
+bassblock docs | schema                print this guide | the block.json JSON Schema
 ```

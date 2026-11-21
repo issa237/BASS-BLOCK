@@ -1,24 +1,32 @@
-# BASS BLOCK (macOS)
+# BASS BLOCK
 
 One host app for AI-generated mini-apps called **blocks**. Describe a tool, your installed coding agent
-(Claude Code, Gemini CLI or Codex) writes it, BASS BLOCK validates it in its sandbox and opens it.
+(Antigravity, Claude Code, Gemini CLI or Codex) writes it in the best language for the job (Web/JS/TypeScript, Python, Swift, Rust, C++, Go, or Node.js), BASS BLOCK validates it in its sandbox and opens it.
 
-Status: **Phase 1 MVP: web blocks only.**
+Status: **Phase 2: Web & Polyglot Blocks (Python, Swift, Rust, C++, Go, Node.js, TypeScript/WebGL).**
 
-## Run
+## Get Started (Clone & Run)
 
 ```bash
+git clone https://github.com/issa237/BASS-BLOCK.git
+cd BASS-BLOCK
 npm install
-npm start          # build + launch
-npm test           # build + smoke tests (throwaway BASSBLOCK_HOME)
-npm run typecheck
+npm start          # build + launch BASS BLOCK
 ```
 
-## Build the macOS app (.dmg)
+### Verify & Test
+
+```bash
+npm test           # build + run end-to-end smoke tests (throwaway BASSBLOCK_HOME)
+npm run typecheck  # TypeScript check
+```
+
+## Build the macOS app (.dmg) or Windows installer (.exe)
 
 ```bash
 npm run dist          # → release/BASS-BLOCK-<version>-arm64.dmg (+ .zip), ad-hoc signed
 npm run pack          # → release/mac-arm64/BASS BLOCK.app only (faster, for testing)
+npm run dist:win      # → release/BASS-BLOCK-<version>-x64.exe (NSIS + portable)
 npm run icons         # re-render build/icon.png and the DMG background from the SVGs
 ```
 
@@ -46,17 +54,19 @@ Electron's binary download is an install script; npm 11 needs it approved once (
 
 ```
 src/main/main.ts       entry: host app, or `--bb-validate <dir>` headless validation
-src/main/host.ts       window, sidebar/tabs IPC, block views, permission prompts, CLI socket, live reload
-src/main/sandbox.ts    per-block session, block:// protocol, CSP, network wall, navigation lock
-src/main/bbApi.ts      the bb.* API (storage, data, fs handles, clipboard, net, events), permission-checked
-src/main/validate.ts   headless launch: load errors, console errors, empty render, screenshot
+src/main/host.ts       window, sidebar/tabs/split-view IPC, block views, permission prompts, CLI socket, live reload
+src/main/sandbox.ts    per-block session, block:// protocol (with native .ts support), CSP, network wall, navigation lock
+src/main/bbApi.ts      the bb.* API (storage, data, fs files & directories, clipboard, net, backend, events)
+src/main/supervisor.ts polyglot backend compiler & process supervisor (stdio JSON-RPC + loopback HTTP)
+src/main/runtimes.ts   detects installed compilers & runtimes (Python, Swift, Rust, C++, Go, Node.js, FFmpeg)
+src/main/validate.ts   headless launch: manifest, files, backend build/start, load/console errors, render, screenshot
 src/main/agent.ts      headless agent runner: snapshot → agent → validate → repair (max 3)
 src/preload/           host preload (window.host) and block preload (window.bb)
-src/renderer/          host UI
-src/cli/bassblock.ts   create | validate | run | reload | list | docs | schema
-sdk/block.schema.json  block.json schema v1
+src/renderer/          host UI (library grid, split view, version history, AI & runtime settings)
+src/cli/bassblock.ts   create | validate | run | reload | list | runtimes | install-skill | docs | schema
+sdk/block.schema.json  block.json schema v1 (web + polyglot modes)
 sdk/skills/bass-block-builder/SKILL.md   the guide agents follow
-templates/             blank, text-tool, image-tool, three-viewer
+templates/             blank, text-tool, image-tool, three-viewer, python-tool, swift-tool
 ```
 
 ## On disk

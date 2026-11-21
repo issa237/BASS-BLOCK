@@ -1,0 +1,20 @@
+{
+  "schema": 1,
+  "id": "swift-tool",
+  "name": "Swift Native Engine",
+  "description": "Polyglot block with a compiled native Swift backend for high-speed macOS computation and native APIs.",
+  "icon": "🦅",
+  "version": "0.1.0",
+  "mode": "polyglot",
+  "sdk": "^1.0",
+  "entry": { "ui": "index.html" },
+  "backend": {
+    "language": "swift",
+    "protocol": "stdio",
+    "build": ["swiftc", "-O", "backend/main.swift", "-o", ".bin/server"],
+    "run": [".bin/server"]
+  },
+  "permissions": { "fs": "none", "network": false, "clipboard": false },
+  "io": { "inputs": [], "outputs": [] },
+  "platform": { "os": "macos", "arch": ["arm64", "x64"] }
+}

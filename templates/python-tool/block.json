@@ -1,0 +1,19 @@
+{
+  "schema": 1,
+  "id": "python-tool",
+  "name": "Python Data Lab",
+  "description": "Polyglot block powered by a Python 3 backend (stdio JSON-RPC) for data analysis, statistics and text/file processing.",
+  "icon": "🐍",
+  "version": "0.1.0",
+  "mode": "polyglot",
+  "sdk": "^1.0",
+  "entry": { "ui": "index.html" },
+  "backend": {
+    "language": "python",
+    "protocol": "stdio",
+    "run": ["python3", "-u", "backend/main.py"]
+  },
+  "permissions": { "fs": "user-picked-files", "network": false, "clipboard": false },
+  "io": { "inputs": [], "outputs": [] },
+  "platform": { "os": "any", "arch": ["arm64", "x64"] }
+}

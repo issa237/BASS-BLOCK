@@ -16,6 +16,7 @@
     "icons": "electron scripts/make-icon.cjs",
     "pack": "npm run build && electron-builder --mac dir --arm64 -c.mac.identity=-",
     "dist": "npm run build && electron-builder --mac --arm64 -c.mac.identity=-",
+    "dist:win": "npm run build && electron-builder --win --x64",
     "dist:release": "npm run build && electron-builder --mac --arm64 --x64 -c.mac.notarize=true"
   },
   "devDependencies": {
@@ -90,6 +91,24 @@
           "path": "/Applications"
         }
       ]
+    },
+    "win": {
+      "icon": "build/icon.png",
+      "target": [
+        {
+          "target": "nsis",
+          "arch": ["x64", "arm64"]
+        },
+        {
+          "target": "portable",
+          "arch": ["x64"]
+        }
+      ],
+      "artifactName": "BASS-BLOCK-${version}-${arch}.${ext}"
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true
     }
   }
 }

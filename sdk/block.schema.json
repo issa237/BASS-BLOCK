@@ -18,8 +18,8 @@
     "icon": { "type": "string", "maxLength": 8, "description": "One emoji shown on the block tile." },
     "version": { "type": "string", "pattern": "^\\d+\\.\\d+\\.\\d+$" },
     "mode": {
-      "enum": ["web"],
-      "description": "Only 'web' (HTML/CSS/JS UI in a sandboxed view) is supported in this host version."
+      "enum": ["web", "polyglot"],
+      "description": "'web' for pure HTML/CSS/JS/WASM UI blocks; 'polyglot' for blocks with a local backend in any language (Python, Swift, Rust, C++, Go, Node.js)."
     },
     "sdk": { "type": "string", "pattern": "^\\^?1(\\.\\d+){0,2}$", "description": "SDK range, e.g. ^1.0" },
     "entry": {
@@ -27,11 +27,50 @@
       "additionalProperties": false,
       "required": ["ui"],
       "properties": {
-        "ui": { "type": "string", "pattern": "^[A-Za-z0-9_./-]+\\.html$" }
+        "ui": { "type": "string", "pattern": "^[A-Za-z0-9_./-]+\\.html$" },
+        "script": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9_./-]+\\.(ts|tsx|js|mjs)$",
+          "description": "Optional TypeScript/ES module entry automatically bundled by BASS BLOCK into bundle.js."
+        }
       }
     },
     "backend": {
-      "description": "Reserved for Mode 2 (polyglot backends). Not supported by this host version yet."
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["language", "run"],
+      "description": "Local backend process supervised by BASS BLOCK (used when mode is 'polyglot').",
+      "properties": {
+        "language": {
+          "enum": ["python", "swift", "rust", "cpp", "go", "node", "custom"],
+          "description": "Primary language/toolchain required to build and run this backend."
+        },
+        "protocol": {
+          "enum": ["stdio", "http"],
+          "default": "stdio",
+          "description": "'stdio' for line-delimited JSON-RPC over stdin/stdout (zero dependencies); 'http' for a local server listening on 127.0.0.1:$BB_PORT."
+        },
+        "build": {
+          "oneOf": [
+            { "type": "string", "minLength": 1 },
+            { "type": "array", "items": { "type": "string", "minLength": 1 }, "minItems": 1 }
+          ],
+          "description": "Optional compile step run inside the block's code/ folder before starting (e.g. ['swiftc', '-O', 'backend/main.swift', '-o', '.bin/server'])."
+        },
+        "run": {
+          "oneOf": [
+            { "type": "string", "minLength": 1 },
+            { "type": "array", "items": { "type": "string", "minLength": 1 }, "minItems": 1 }
+          ],
+          "description": "Command to launch the backend inside the block's code/ folder (e.g. ['python3', '-u', 'backend/main.py'] or ['.bin/server'])."
+        },
+        "healthPath": {
+          "type": "string",
+          "pattern": "^/.*",
+          "default": "/health",
+          "description": "For 'http' protocol backends: GET path polled on 127.0.0.1:$BB_PORT until it returns 2xx."
+        }
+      }
     },
     "permissions": {
       "type": "object",
@@ -64,7 +103,7 @@
       "type": "object",
       "additionalProperties": false,
       "properties": {
-        "os": { "const": "macos" },
+        "os": { "enum": ["macos", "windows", "linux", "any"] },
         "arch": { "type": "array", "items": { "enum": ["arm64", "x64"] } }
       }
     },

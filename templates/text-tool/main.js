@@ -49,19 +49,29 @@ editor.addEventListener("input", () => {
   }, 400);
 });
 
+let currentHandle = null;
+
 document.getElementById("open").addEventListener("click", async () => {
-  const [file] = await bb.fs.pickOpen({ filters: [{ name: "Text", extensions: ["md", "markdown", "txt"] }] });
+  const [file] = await bb.fs.pickOpen({ writable: true, filters: [{ name: "Text", extensions: ["md", "markdown", "txt"] }] });
   if (!file) return;
+  currentHandle = file.handle;
   editor.value = await bb.fs.readText(file.handle);
   fileEl.textContent = file.name;
   editor.dispatchEvent(new Event("input"));
 });
 
 document.getElementById("save").addEventListener("click", async () => {
+  if (currentHandle) {
+    await bb.fs.write(currentHandle, editor.value);
+    savedEl.textContent = "Saved to file";
+    return;
+  }
   const file = await bb.fs.pickSave({ suggestedName: fileEl.textContent || "document.md" });
   if (!file) return;
+  currentHandle = file.handle;
   await bb.fs.write(file.handle, editor.value);
   fileEl.textContent = file.name;
+  savedEl.textContent = "Saved to file";
 });
 
 // Other blocks can send text in.

@@ -1,7 +1,9 @@
 // End-to-end smoke test in a throwaway BASSBLOCK_HOME:
-//   templates create + validate, broken block is rejected, AI undo restores code and never touches data/.
+//   all 6 templates (including polyglot Python & compiled Swift) create + validate,
+//   TypeScript (.ts) block scripts work natively, <a href="https://..."> links pass staticCheck,
+//   broken blocks are rejected, and multi-step AI undo + snapshot restore never touch data/.
 import { build } from "esbuild";
-import { execFileSync, spawnSync } from "node:child_process";
+import { spawnSync } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -20,7 +22,13 @@ const check = (name, ok, extra = "") => {
   if (!ok) failed++;
 };
 
-for (const t of ["blank", "text-tool", "image-tool", "three-viewer"]) {
+// 1. Runtimes detection
+const rtOut = cli("runtimes", "--json");
+const runtimes = JSON.parse(rtOut.stdout || "[]");
+check("detects local language runtimes", rtOut.status === 0 && Array.isArray(runtimes) && runtimes.some((r) => r.id === "python" && r.path));
+
+// 2. All 6 templates (web + polyglot Python + polyglot compiled Swift)
+for (const t of ["blank", "text-tool", "image-tool", "three-viewer", "python-tool", "swift-tool"]) {
   const c = cli("create", `s-${t}`, "--template", t);
   check(`create ${t}`, c.status === 0, c.stderr);
   const v = cli("validate", `s-${t}`, "--json");
@@ -28,7 +36,23 @@ for (const t of ["blank", "text-tool", "image-tool", "three-viewer"]) {
   check(`validate ${t}`, v.status === 0 && r.ok, JSON.stringify(r.problems));
 }
 
-// Broken block must fail with actionable problems.
+// 3. Native TypeScript (.ts) script + <a href="https://..."> external link allowed in staticCheck
+cli("create", "s-ts-link", "--template", "blank");
+const tsDir = path.join(home, "blocks/s-ts-link/code");
+fs.writeFileSync(
+  path.join(tsDir, "index.html"),
+  '<!doctype html><title>TS Block</title><body><h1 id="msg">Loading</h1><a href="https://example.com">Docs</a><script type="module" src="main.ts"></script></body>',
+);
+fs.writeFileSync(
+  path.join(tsDir, "main.ts"),
+  'interface Greeting { text: string; url: string }\nconst g: Greeting = { text: "TypeScript Ready", url: "https://example.com" };\ndocument.getElementById("msg")!.textContent = g.text;\n(window as any).bb.ready();\n',
+);
+fs.unlinkSync(path.join(tsDir, "main.js"));
+const tsv = cli("validate", "s-ts-link", "--json");
+const tsr = JSON.parse(tsv.stdout || "{}");
+check("TypeScript (.ts) script & <a href='https://...'> pass validation", tsv.status === 0 && tsr.ok, JSON.stringify(tsr.problems));
+
+// 4. Broken block must fail with actionable problems
 cli("create", "s-broken", "--template", "blank");
 const bd = path.join(home, "blocks/s-broken/code");
 fs.writeFileSync(path.join(bd, "main.js"), "nope();\n");
@@ -40,12 +64,19 @@ check("reports runtime error", br.problems?.some((p) => /nope is not defined/.te
 check("reports inline handler", br.problems?.some((p) => /Inline event handler/.test(p.message)));
 check("reports empty render", br.problems?.some((p) => p.step === "render"));
 
-// Bad manifest
-fs.writeFileSync(path.join(bd, "block.json"), JSON.stringify({ schema: 1, id: "s-broken", name: "x", version: "1", mode: "native", sdk: "^1.0", entry: { ui: "index.html" } }));
+// 5. Bad manifest
+fs.writeFileSync(
+  path.join(bd, "block.json"),
+  JSON.stringify({ schema: 1, id: "s-broken", name: "x", version: "1", mode: "native", sdk: "^1.0", entry: { ui: "index.html" } }),
+);
 const mv = JSON.parse(cli("validate", "s-broken", "--json").stdout || "{}");
-check("schema errors reported", mv.problems?.some((p) => p.step === "manifest" && /mode/.test(p.message)) && mv.problems?.some((p) => /version/.test(p.message)), JSON.stringify(mv.problems));
+check(
+  "schema errors reported",
+  mv.problems?.some((p) => p.step === "manifest" && /mode/.test(p.message)) && mv.problems?.some((p) => /version/.test(p.message)),
+  JSON.stringify(mv.problems),
+);
 
-// History: undo an "AI" change; data/ survives.
+// 6. History: multi-step AI undo + explicit snapshot restore; data/ survives
 const lib = path.join(home, "lib.cjs");
 await build({ entryPoints: [path.join(root, "src/shared/blocks.ts")], bundle: true, platform: "node", format: "cjs", outfile: lib, logLevel: "silent" });
 process.env.BASSBLOCK_HOME = home;
@@ -66,7 +97,7 @@ check("undo removes files the AI added", !fs.existsSync(path.join(code, "extra.j
 check("data/ untouched", fs.readFileSync(path.join(data, "storage.json"), "utf8") === '{"doc":"user work"}');
 check("second undo has nothing to undo", history.undoLastAiChange(id) === null);
 
-// Path safety
+// 7. Path safety
 const plib = path.join(home, "paths.cjs");
 await build({ entryPoints: [path.join(root, "src/shared/paths.ts")], bundle: true, platform: "node", format: "cjs", outfile: plib, logLevel: "silent" });
 const { safeJoin } = require(plib);

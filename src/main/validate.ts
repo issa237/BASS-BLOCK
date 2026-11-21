@@ -1,6 +1,7 @@
 /**
- * Full validation of a web block: static checks, then a headless launch in the same sandbox
- * the real host uses, collecting load failures, console errors, crashes and a screenshot.
+ * Full validation of a web or polyglot block: static checks, backend build & launch check
+ * (when mode is "polyglot"), then a headless launch in the same sandbox the real host uses,
+ * collecting load failures, console errors, crashes and a screenshot.
  */
 import fs from "node:fs";
 import os from "node:os";
@@ -8,7 +9,8 @@ import path from "node:path";
 import crypto from "node:crypto";
 import { BrowserWindow } from "electron";
 import { staticCheck, type Problem } from "../shared/blocks";
-import { blockContexts, blockSession, blockUrl, blockWebPreferences, consoleDetails, lockNavigation } from "./sandbox";
+import { blockContexts, blockSession, blockUrl, blockWebPreferences, cleanupBlockSession, consoleDetails, lockNavigation } from "./sandbox";
+import { backendKey, ensureBackend, stopBackend } from "./supervisor";
 
 export interface ValidationResult {
   ok: boolean;
@@ -19,7 +21,10 @@ export interface ValidationResult {
   loadMs?: number;
 }
 
-export async function validateBlock(codeDir: string, opts: { blockPreload: string; screenshotPath?: string; expectedId?: string; timeoutMs?: number }): Promise<ValidationResult> {
+export async function validateBlock(
+  codeDir: string,
+  opts: { blockPreload: string; screenshotPath?: string; expectedId?: string; timeoutMs?: number },
+): Promise<ValidationResult> {
   const { manifest, problems } = staticCheck(codeDir, opts.expectedId);
   const warnings: string[] = [];
   if (!manifest || problems.some((p) => p.step === "manifest")) return { ok: false, id: manifest?.id, problems, warnings };
@@ -37,6 +42,8 @@ export async function validateBlock(codeDir: string, opts: { blockPreload: strin
     webPreferences: blockWebPreferences(partition, opts.blockPreload),
   });
   const wc = win.webContents;
+  const wcId = wc.id;
+  const bKey = backendKey(manifest.id, wcId, true);
   const ctx = { blockId: manifest.id, codeDir, dataDir: tmpData, manifest, validating: true, ready: false };
   blockContexts.set(wc, ctx);
   lockNavigation(wc, manifest.id);
@@ -62,38 +69,56 @@ export async function validateBlock(codeDir: string, opts: { blockPreload: strin
     if (code !== -3) problems.push({ step: "load", message: `Blocked request ${url}: ${desc}` });
   });
   wc.session.webRequest.onErrorOccurred(({ url, error }) => {
-    if (error === "net::ERR_BLOCKED_BY_CLIENT") runtime(`Blocked request to ${url}. Blocks can't load remote resources; use bb.net.fetch for data or vendor the file.`);
+    if (error === "net::ERR_BLOCKED_BY_CLIENT")
+      runtime(`Blocked request to ${url}. Blocks can't load remote resources; use bb.net.fetch for data or vendor the file.`);
   });
 
-  const timeoutMs = opts.timeoutMs ?? 15000;
+  const timeoutMs = opts.timeoutMs ?? (manifest.mode === "polyglot" ? 30000 : 15000);
   const t0 = Date.now();
   let loadMs: number | undefined;
   try {
-    await Promise.race([
-      wc.loadURL(blockUrl(manifest)).then(() => (loadMs = Date.now() - t0)),
-      new Promise((_, rej) => setTimeout(() => rej(new Error(`Page did not finish loading within ${timeoutMs} ms`)), timeoutMs)),
-    ]);
-    // Give scripts a moment to run (or to call bb.ready()).
-    const settleUntil = Date.now() + 2500;
-    while (Date.now() < settleUntil && !ctx.ready) await new Promise((r) => setTimeout(r, 100));
-    if (!ctx.ready) await new Promise((r) => setTimeout(r, 300));
+    if (manifest.mode === "polyglot" && manifest.backend) {
+      try {
+        await ensureBackend({ key: bKey, blockId: manifest.id, wcId, codeDir, dataDir: tmpData, manifest });
+      } catch (e) {
+        problems.push({ step: "backend", message: (e as Error).message });
+      }
+    }
 
-    const rendered = (await wc.executeJavaScript(
-      `(() => { const b = document.body; if (!b) return { size: 0 }; const r = b.getBoundingClientRect(); return { size: b.innerText.trim().length + b.querySelectorAll('canvas,svg,img,video,input,textarea,button').length, w: r.width, h: r.height, title: document.title }; })()`,
-      true,
-    )) as { size: number; title?: string };
-    if (!rendered.size) problems.push({ step: "render", message: "The page rendered nothing visible (empty <body>, no text, no controls). Check that your script runs and builds the UI." });
-    if (!rendered.title) warnings.push("Set a <title> in the entry HTML.");
+    if (!problems.some((p) => p.step === "backend")) {
+      await Promise.race([
+        wc.loadURL(blockUrl(manifest)).then(() => (loadMs = Date.now() - t0)),
+        new Promise((_, rej) => setTimeout(() => rej(new Error(`Page did not finish loading within ${timeoutMs} ms`)), timeoutMs)),
+      ]);
+      // Give scripts (and initial backend RPC calls) a moment to run and call bb.ready().
+      const settleMs = manifest.mode === "polyglot" ? 3500 : 2500;
+      const settleUntil = Date.now() + settleMs;
+      while (Date.now() < settleUntil && !ctx.ready) await new Promise((r) => setTimeout(r, 100));
+      if (!ctx.ready) await new Promise((r) => setTimeout(r, 300));
 
-    if (opts.screenshotPath) {
-      const img = await wc.capturePage();
-      fs.mkdirSync(path.dirname(opts.screenshotPath), { recursive: true });
-      fs.writeFileSync(opts.screenshotPath, img.toPNG());
+      const rendered = (await wc.executeJavaScript(
+        `(() => { const b = document.body; if (!b) return { size: 0 }; const r = b.getBoundingClientRect(); return { size: b.innerText.trim().length + b.querySelectorAll('canvas,svg,img,video,input,textarea,button').length, w: r.width, h: r.height, title: document.title }; })()`,
+        true,
+      )) as { size: number; title?: string };
+      if (!rendered.size)
+        problems.push({
+          step: "render",
+          message: "The page rendered nothing visible (empty <body>, no text, no controls). Check that your script runs and builds the UI.",
+        });
+      if (!rendered.title) warnings.push("Set a <title> in the entry HTML.");
+
+      if (opts.screenshotPath) {
+        const img = await wc.capturePage();
+        fs.mkdirSync(path.dirname(opts.screenshotPath), { recursive: true });
+        fs.writeFileSync(opts.screenshotPath, img.toPNG());
+      }
     }
   } catch (e) {
     problems.push({ step: "load", message: (e as Error).message });
   } finally {
+    stopBackend(bKey);
     win.destroy();
+    await cleanupBlockSession(partition);
     fs.rmSync(tmpData, { recursive: true, force: true });
   }
   return { ok: problems.length === 0, id: manifest.id, problems, warnings, screenshot: opts.screenshotPath, loadMs };

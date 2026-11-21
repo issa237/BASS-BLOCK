@@ -10,13 +10,18 @@ import { BrowserWindow, clipboard, dialog, ipcMain, net, webContents, type IpcMa
 import { effectivePermissions } from "../shared/blocks";
 import { safeJoin } from "../shared/paths";
 import { blockContexts, type BlockContext } from "./sandbox";
+import { backendKey, callBackend, fetchBackend, setSupervisorCallbacks } from "./supervisor";
 
 const STORAGE_LIMIT = 10 * 1024 * 1024;
 const FILE_LIMIT = 512 * 1024 * 1024;
 
-type Handle = { path: string; canWrite: boolean };
-/** File handles from pickers, per webContents. They vanish when the view is closed. */
-const handles = new Map<number, Map<string, Handle>>();
+type Handle = { path: string; canWrite: boolean; isDir?: boolean };
+/** File/directory handles from pickers, per block (or validation run). */
+const handles = new Map<string, Map<string, Handle>>();
+
+export function clearBlockHandles(blockId: string) {
+  handles.delete(`live:${blockId}`);
+}
 
 export type BlockLogSink = (blockId: string, level: string, message: string) => void;
 let logSink: BlockLogSink = () => {};
@@ -30,23 +35,47 @@ class BBError extends Error {
   }
 }
 
+// ---------------------------------------------------------------------------
+// In-memory cached + async-flushed storage (prevents main-thread UI freezes)
+// ---------------------------------------------------------------------------
+const storageCache = new Map<string, Record<string, unknown>>();
+const storageQueues = new Map<string, Promise<void>>();
+let tmpSeq = 0;
+
 function storageFile(ctx: BlockContext) {
   return path.join(ctx.dataDir, "storage.json");
 }
+
 function readStorage(ctx: BlockContext): Record<string, unknown> {
+  const cached = storageCache.get(ctx.dataDir);
+  if (cached) return cached;
+  let obj: Record<string, unknown> = {};
   try {
-    return JSON.parse(fs.readFileSync(storageFile(ctx), "utf8"));
+    obj = JSON.parse(fs.readFileSync(storageFile(ctx), "utf8"));
   } catch {
-    return {};
+    obj = {};
   }
+  storageCache.set(ctx.dataDir, obj);
+  return obj;
 }
-function writeStorage(ctx: BlockContext, obj: Record<string, unknown>) {
+
+async function writeStorage(ctx: BlockContext, obj: Record<string, unknown>): Promise<void> {
   const text = JSON.stringify(obj);
   if (text.length > STORAGE_LIMIT) throw new BBError("quota", "bb.storage is limited to 10 MB. Use bb.data for large content.");
-  fs.mkdirSync(ctx.dataDir, { recursive: true });
-  const tmp = storageFile(ctx) + ".tmp";
-  fs.writeFileSync(tmp, text);
-  fs.renameSync(tmp, storageFile(ctx));
+  storageCache.set(ctx.dataDir, obj);
+
+  const prev = storageQueues.get(ctx.dataDir) ?? Promise.resolve();
+  const next = prev
+    .catch(() => {})
+    .then(async () => {
+      await fs.promises.mkdir(ctx.dataDir, { recursive: true });
+      const target = storageFile(ctx);
+      const tmp = `${target}.${process.pid}.${++tmpSeq}.tmp`;
+      await fs.promises.writeFile(tmp, text, "utf8");
+      await fs.promises.rename(tmp, target);
+    });
+  storageQueues.set(ctx.dataDir, next);
+  await next;
 }
 
 function dataPath(ctx: BlockContext, name: unknown): string {
@@ -76,23 +105,25 @@ function requireFs(ctx: BlockContext) {
 }
 
 function hostAllowed(ctx: BlockContext, url: URL): boolean {
-  const net = effectivePermissions(ctx.manifest).network;
-  if (net === true) return true;
-  if (!Array.isArray(net)) return false;
-  return net.some((h) => url.hostname === h || url.hostname.endsWith("." + h));
+  const netPerm = effectivePermissions(ctx.manifest).network;
+  if (netPerm === true) return true;
+  if (!Array.isArray(netPerm)) return false;
+  return netPerm.some((h) => url.hostname === h || url.hostname.endsWith("." + h));
 }
 
 function ownerWindow(e: IpcMainInvokeEvent): BrowserWindow | undefined {
   return BrowserWindow.fromWebContents(e.sender) ?? BrowserWindow.getAllWindows().find((w) => w.isVisible());
 }
 
-function handleMap(e: IpcMainInvokeEvent) {
-  let m = handles.get(e.sender.id);
+function handleMap(ctx: BlockContext, e: IpcMainInvokeEvent) {
+  const key = ctx.validating ? `val:${e.sender.id}` : `live:${ctx.blockId}`;
+  let m = handles.get(key);
   if (!m) {
     m = new Map();
-    handles.set(e.sender.id, m);
-    const id = e.sender.id;
-    e.sender.once("destroyed", () => handles.delete(id));
+    handles.set(key, m);
+    if (ctx.validating) {
+      e.sender.once("destroyed", () => handles.delete(key));
+    }
   }
   return m;
 }
@@ -100,7 +131,15 @@ function handleMap(e: IpcMainInvokeEvent) {
 type Method = (ctx: BlockContext, e: IpcMainInvokeEvent, ...args: any[]) => unknown;
 
 const methods: Record<string, Method> = {
-  "info": (ctx) => ({ id: ctx.manifest.id, name: ctx.manifest.name, version: ctx.manifest.version, sdk: "1.0.0", permissions: effectivePermissions(ctx.manifest) }),
+  "info": (ctx) => ({
+    id: ctx.manifest.id,
+    name: ctx.manifest.name,
+    version: ctx.manifest.version,
+    mode: ctx.manifest.mode,
+    backend: ctx.manifest.backend ? { language: ctx.manifest.backend.language, protocol: ctx.manifest.backend.protocol ?? "stdio" } : null,
+    sdk: "1.0.0",
+    permissions: effectivePermissions(ctx.manifest),
+  }),
   "ready": (ctx) => {
     ctx.ready = true;
     return true;
@@ -111,16 +150,16 @@ const methods: Record<string, Method> = {
 
   // ---- storage: small JSON key/value, persisted in data/storage.json ----
   "storage.get": (ctx, _e, key: string) => readStorage(ctx)[String(key)] ?? null,
-  "storage.set": (ctx, _e, key: string, value: unknown) => {
-    const s = readStorage(ctx);
+  "storage.set": async (ctx, _e, key: string, value: unknown) => {
+    const s = { ...readStorage(ctx) };
     s[String(key)] = value === undefined ? null : JSON.parse(JSON.stringify(value));
-    writeStorage(ctx, s);
+    await writeStorage(ctx, s);
     return true;
   },
-  "storage.delete": (ctx, _e, key: string) => {
-    const s = readStorage(ctx);
+  "storage.delete": async (ctx, _e, key: string) => {
+    const s = { ...readStorage(ctx) };
     delete s[String(key)];
-    writeStorage(ctx, s);
+    await writeStorage(ctx, s);
     return true;
   },
   "storage.keys": (ctx) => Object.keys(readStorage(ctx)),
@@ -161,8 +200,12 @@ const methods: Record<string, Method> = {
     return out;
   },
 
-  // ---- fs: user-picked files only ----
-  "fs.pickOpen": async (ctx, e, opts: { multiple?: boolean; filters?: { name: string; extensions: string[] }[]; title?: string } = {}) => {
+  // ---- fs: user-picked files & directories ----
+  "fs.pickOpen": async (
+    ctx,
+    e,
+    opts: { multiple?: boolean; writable?: boolean; filters?: { name: string; extensions: string[] }[]; title?: string } = {},
+  ) => {
     requireFs(ctx);
     if (ctx.validating) return [];
     const win = ownerWindow(e);
@@ -172,11 +215,11 @@ const methods: Record<string, Method> = {
       ? await dialog.showOpenDialog(win, { title: opts.title, properties: props, filters: opts.filters })
       : await dialog.showOpenDialog({ title: opts.title, properties: props, filters: opts.filters });
     if (res.canceled) return [];
-    const m = handleMap(e);
+    const m = handleMap(ctx, e);
     return res.filePaths.map((p) => {
       const handle = crypto.randomUUID();
-      m.set(handle, { path: p, canWrite: false });
-      return { handle, name: path.basename(p), size: fs.statSync(p).size };
+      m.set(handle, { path: p, canWrite: Boolean(opts.writable) });
+      return { handle, name: path.basename(p), size: fs.statSync(p).size, writable: Boolean(opts.writable) };
     });
   },
   "fs.pickSave": async (ctx, e, opts: { suggestedName?: string; filters?: { name: string; extensions: string[] }[]; title?: string } = {}) => {
@@ -187,21 +230,76 @@ const methods: Record<string, Method> = {
     const res = win ? await dialog.showSaveDialog(win, o) : await dialog.showSaveDialog(o);
     if (res.canceled || !res.filePath) return null;
     const handle = crypto.randomUUID();
-    handleMap(e).set(handle, { path: res.filePath, canWrite: true });
+    handleMap(ctx, e).set(handle, { path: res.filePath, canWrite: true });
     return { handle, name: path.basename(res.filePath) };
+  },
+  "fs.pickDirectory": async (ctx, e, opts: { writable?: boolean; title?: string } = {}) => {
+    requireFs(ctx);
+    if (ctx.validating) return null;
+    const win = ownerWindow(e);
+    const props: ("openDirectory" | "createDirectory")[] = ["openDirectory"];
+    if (opts.writable) props.push("createDirectory");
+    const res = win
+      ? await dialog.showOpenDialog(win, { title: opts.title, properties: props })
+      : await dialog.showOpenDialog({ title: opts.title, properties: props });
+    if (res.canceled || !res.filePaths[0]) return null;
+    const dirPath = res.filePaths[0];
+    const handle = crypto.randomUUID();
+    handleMap(ctx, e).set(handle, { path: dirPath, canWrite: Boolean(opts.writable), isDir: true });
+    return { handle, name: path.basename(dirPath), writable: Boolean(opts.writable) };
   },
   "fs.read": async (ctx, e, handle: string, opts) => {
     requireFs(ctx);
-    const h = handleMap(e).get(String(handle));
-    if (!h) throw new BBError("invalid", "unknown file handle (handles only last while the block is open)");
+    const h = handleMap(ctx, e).get(String(handle));
+    if (!h || h.isDir) throw new BBError("invalid", "unknown file handle (handles only last while the block is open)");
     return readOut(await fs.promises.readFile(h.path), opts);
   },
   "fs.write": async (ctx, e, handle: string, data: unknown) => {
     requireFs(ctx);
-    const h = handleMap(e).get(String(handle));
-    if (!h) throw new BBError("invalid", "unknown file handle");
-    if (!h.canWrite) throw new BBError("permission", "this handle is read-only. Use bb.fs.pickSave() to get a writable file.");
+    const h = handleMap(ctx, e).get(String(handle));
+    if (!h || h.isDir) throw new BBError("invalid", "unknown file handle");
+    if (!h.canWrite) throw new BBError("permission", "this handle is read-only. Pass { writable: true } to bb.fs.pickOpen() or use bb.fs.pickSave().");
     await fs.promises.writeFile(h.path, toBuffer(data));
+    return true;
+  },
+  "fs.listDir": async (ctx, e, dirHandle: string, relDir = "") => {
+    requireFs(ctx);
+    const h = handleMap(ctx, e).get(String(dirHandle));
+    if (!h || !h.isDir) throw new BBError("invalid", "unknown directory handle");
+    const target = relDir ? safeJoin(h.path, String(relDir)) : h.path;
+    if (!target || !fs.existsSync(target)) throw new BBError("invalid", "directory path does not exist or escapes picked folder");
+    const entries = await fs.promises.readdir(target, { withFileTypes: true });
+    return entries
+      .filter((ent) => !ent.name.startsWith("."))
+      .map((ent) => {
+        const full = path.join(target, ent.name);
+        let size = 0;
+        let modified = 0;
+        try {
+          const st = fs.statSync(full);
+          size = st.size;
+          modified = st.mtimeMs;
+        } catch {}
+        return { name: ent.name, isDirectory: ent.isDirectory(), size, modified };
+      });
+  },
+  "fs.readDirFile": async (ctx, e, dirHandle: string, relPath: string, opts) => {
+    requireFs(ctx);
+    const h = handleMap(ctx, e).get(String(dirHandle));
+    if (!h || !h.isDir) throw new BBError("invalid", "unknown directory handle");
+    const target = safeJoin(h.path, String(relPath));
+    if (!target || !fs.existsSync(target)) throw new BBError("invalid", "file path does not exist or escapes picked folder");
+    return readOut(await fs.promises.readFile(target), opts);
+  },
+  "fs.writeDirFile": async (ctx, e, dirHandle: string, relPath: string, data: unknown) => {
+    requireFs(ctx);
+    const h = handleMap(ctx, e).get(String(dirHandle));
+    if (!h || !h.isDir) throw new BBError("invalid", "unknown directory handle");
+    if (!h.canWrite) throw new BBError("permission", "directory was opened read-only. Pass { writable: true } to bb.fs.pickDirectory().");
+    const target = safeJoin(h.path, String(relPath));
+    if (!target) throw new BBError("invalid", "file path escapes picked folder");
+    await fs.promises.mkdir(path.dirname(target), { recursive: true });
+    await fs.promises.writeFile(target, toBuffer(data));
     return true;
   },
 
@@ -239,6 +337,37 @@ const methods: Record<string, Method> = {
     return { status: res.status, ok: res.ok, url: res.url, headers, body };
   },
 
+  // ---- polyglot backend bridge (Python, Swift, Rust, C++, Go, Node.js) ----
+  "backend.info": (ctx) => ({
+    enabled: ctx.manifest.mode === "polyglot" && !!ctx.manifest.backend,
+    language: ctx.manifest.backend?.language ?? null,
+    protocol: ctx.manifest.backend?.protocol ?? "stdio",
+  }),
+  "backend.call": async (ctx, e, method: string, params?: unknown, timeoutMs?: number) => {
+    if (ctx.manifest.mode !== "polyglot" || !ctx.manifest.backend) {
+      throw new BBError("permission", `This block is not in "mode": "polyglot" with a "backend" in block.json`);
+    }
+    if (typeof method !== "string" || !method) throw new BBError("invalid", "method name must be a non-empty string");
+    const key = backendKey(ctx.blockId, e.sender.id, ctx.validating);
+    return callBackend(
+      { key, blockId: ctx.blockId, wcId: e.sender.id, codeDir: ctx.codeDir, dataDir: ctx.dataDir, manifest: ctx.manifest },
+      method,
+      params,
+      typeof timeoutMs === "number" ? timeoutMs : 30000,
+    );
+  },
+  "backend.fetch": async (ctx, e, reqPath: string, init: { method?: string; headers?: Record<string, string>; body?: string | Uint8Array } = {}) => {
+    if (ctx.manifest.mode !== "polyglot" || !ctx.manifest.backend) {
+      throw new BBError("permission", `This block is not in "mode": "polyglot" with a "backend" in block.json`);
+    }
+    const key = backendKey(ctx.blockId, e.sender.id, ctx.validating);
+    return fetchBackend(
+      { key, blockId: ctx.blockId, wcId: e.sender.id, codeDir: ctx.codeDir, dataDir: ctx.dataDir, manifest: ctx.manifest },
+      String(reqPath),
+      init,
+    );
+  },
+
   // ---- event bus between open blocks ----
   "emit": (ctx, e, name: string, data: unknown) => {
     if (typeof name !== "string" || !/^[a-zA-Z][\w.-]{0,63}$/.test(name)) throw new BBError("invalid", "event name must be a short identifier");
@@ -252,6 +381,12 @@ const methods: Record<string, Method> = {
 };
 
 export function installBBApi(): void {
+  setSupervisorCallbacks({
+    onLog: (blockId, level, text) => logSink(blockId, level, text),
+    onEvent: (wcId, event, data) => {
+      webContents.fromId(wcId)?.send("bb:backend-event", { event, data });
+    },
+  });
   ipcMain.handle("bb:call", async (e, method: string, ...args: unknown[]) => {
     const ctx = blockContexts.get(e.sender);
     if (!ctx) throw new BBError("denied", "not a block");

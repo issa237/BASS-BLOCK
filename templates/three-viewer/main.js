@@ -9,13 +9,13 @@ const renderer = new THREE.WebGLRenderer({ antialias: true });
 renderer.setPixelRatio(devicePixelRatio);
 container.append(renderer.domElement);
 const scene = new THREE.Scene();
-scene.background = new THREE.Color(dark ? 0x151412 : 0xeceae6);
+scene.background = new THREE.Color(dark ? 0x0b1120 : 0xf4f6fa);
 const camera = new THREE.PerspectiveCamera(45, 1, 0.01, 10000);
 scene.add(new THREE.HemisphereLight(0xffffff, dark ? 0x222222 : 0x999999, 1.6));
 const sun = new THREE.DirectionalLight(0xffffff, 2.2);
 sun.position.set(3, 5, 4);
 scene.add(sun);
-const grid = new THREE.GridHelper(10, 20, dark ? 0x444444 : 0xbbbbbb, dark ? 0x2a2a2a : 0xd6d6d6);
+const grid = new THREE.GridHelper(10, 20, dark ? 0x334155 : 0xcbd5e1, dark ? 0x1b2336 : 0xe2e8f0);
 scene.add(grid);
 
 const material = new THREE.MeshStandardMaterial({ color: 0xff8a3d, metalness: 0.1, roughness: 0.45, flatShading: false });

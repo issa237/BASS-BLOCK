@@ -19,6 +19,19 @@ ipcRenderer.on("bb:event", (_e, msg: { from: string; name: string; data: unknown
   for (const fn of listeners.get("*") ?? []) fn({ name: msg.name, data: msg.data }, { from: msg.from });
 });
 
+type BackendListener = (data: unknown) => void;
+const backendListeners = new Map<string, Set<BackendListener>>();
+ipcRenderer.on("bb:backend-event", (_e, msg: { event: string; data: unknown }) => {
+  for (const fn of backendListeners.get(msg.event) ?? []) {
+    try {
+      fn(msg.data);
+    } catch (err) {
+      console.error(err);
+    }
+  }
+  for (const fn of backendListeners.get("*") ?? []) fn(msg);
+});
+
 // Forward uncaught errors to the host log panel so the user (and validator) can see them.
 window.addEventListener("error", (ev) => {
   call("log", "error", `${ev.message} (${ev.filename?.split("/").pop()}:${ev.lineno})`).catch(() => {});
@@ -52,11 +65,18 @@ const bb = {
   },
 
   fs: {
-    pickOpen: (opts?: { multiple?: boolean; title?: string; filters?: { name: string; extensions: string[] }[] }) => call("fs.pickOpen", opts ?? {}),
-    pickSave: (opts?: { suggestedName?: string; title?: string; filters?: { name: string; extensions: string[] }[] }) => call("fs.pickSave", opts ?? {}),
+    pickOpen: (opts?: { multiple?: boolean; writable?: boolean; title?: string; filters?: { name: string; extensions: string[] }[] }) =>
+      call("fs.pickOpen", opts ?? {}),
+    pickSave: (opts?: { suggestedName?: string; title?: string; filters?: { name: string; extensions: string[] }[] }) =>
+      call("fs.pickSave", opts ?? {}),
+    pickDirectory: (opts?: { writable?: boolean; title?: string }) => call("fs.pickDirectory", opts ?? {}),
     read: (handle: string, opts?: { encoding?: "utf8" }) => call("fs.read", handle, opts),
     readText: (handle: string) => call("fs.read", handle, { encoding: "utf8" }),
     write: (handle: string, data: string | Uint8Array | ArrayBuffer) => call("fs.write", handle, data),
+    listDir: (dirHandle: string, relDir?: string) => call("fs.listDir", dirHandle, relDir ?? ""),
+    readDirFile: (dirHandle: string, relPath: string, opts?: { encoding?: "utf8" }) => call("fs.readDirFile", dirHandle, relPath, opts),
+    readDirText: (dirHandle: string, relPath: string) => call("fs.readDirFile", dirHandle, relPath, { encoding: "utf8" }),
+    writeDirFile: (dirHandle: string, relPath: string, data: string | Uint8Array | ArrayBuffer) => call("fs.writeDirFile", dirHandle, relPath, data),
   },
 
   clipboard: {
@@ -76,6 +96,27 @@ const bb = {
         text: () => decoder.decode(r.body),
         json: () => JSON.parse(decoder.decode(r.body)),
       };
+    },
+  },
+
+  backend: {
+    info: () => call("backend.info"),
+    call: (method: string, params?: unknown, timeoutMs?: number) => call("backend.call", method, params, timeoutMs),
+    async fetch(reqPath: string, init?: { method?: string; headers?: Record<string, string>; body?: string | Uint8Array }) {
+      const r = (await call("backend.fetch", reqPath, init ?? {})) as { status: number; ok: boolean; headers: Record<string, string>; body: Uint8Array };
+      return {
+        status: r.status,
+        ok: r.ok,
+        headers: r.headers,
+        bytes: () => r.body,
+        text: () => decoder.decode(r.body),
+        json: () => JSON.parse(decoder.decode(r.body)),
+      };
+    },
+    onEvent(name: string, fn: BackendListener) {
+      if (!backendListeners.has(name)) backendListeners.set(name, new Set());
+      backendListeners.get(name)!.add(fn);
+      return () => backendListeners.get(name)?.delete(fn);
     },
   },
 

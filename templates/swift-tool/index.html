@@ -1,0 +1,26 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Swift Native Engine</title>
+    <link rel="stylesheet" href="style.css" />
+  </head>
+  <body>
+    <header class="bar">
+      <strong>Swift Native Engine</strong>
+      <span class="badge" id="sys">Compiled Swift</span>
+      <span class="spacer"></span>
+      <label class="inline">Sieve Limit <input id="limit" type="number" min="1000" max="2000000" step="10000" value="250000" /></label>
+      <button id="run" class="primary">Run Native Compute</button>
+    </header>
+    <main class="content">
+      <div class="field">
+        <label for="text">Payload for Native CryptoKit SHA-256</label>
+        <input id="text" type="text" value="BASS BLOCK Native Swift Execution" />
+      </div>
+      <div id="metrics" class="metrics"></div>
+      <pre id="raw" class="raw"></pre>
+    </main>
+    <script type="module" src="main.js"></script>
+  </body>
+</html>

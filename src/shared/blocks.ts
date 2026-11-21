@@ -7,6 +7,7 @@ import schema from "../../sdk/block.schema.json";
 import { paths, TEMPLATES_DIR, safeJoin } from "./paths";
 
 export type NetworkPermission = boolean | string[];
+export type BackendLanguage = "python" | "swift" | "rust" | "cpp" | "go" | "node" | "custom";
 
 export interface BlockPermissions {
   fs?: "none" | "user-picked-files";
@@ -20,6 +21,14 @@ export interface BlockPort {
   description?: string;
 }
 
+export interface BlockBackend {
+  language: BackendLanguage;
+  protocol?: "stdio" | "http";
+  build?: string | string[];
+  run: string | string[];
+  healthPath?: string;
+}
+
 export interface BlockManifest {
   schema: 1;
   id: string;
@@ -27,13 +36,13 @@ export interface BlockManifest {
   description?: string;
   icon?: string;
   version: string;
-  mode: "web";
+  mode: "web" | "polyglot";
   sdk: string;
-  entry: { ui: string };
-  backend?: unknown;
+  entry: { ui: string; script?: string };
+  backend?: BlockBackend;
   permissions?: BlockPermissions;
   io?: { inputs?: BlockPort[]; outputs?: BlockPort[] };
-  platform?: { os?: "macos"; arch?: ("arm64" | "x64")[] };
+  platform?: { os?: "macos" | "windows" | "linux" | "any"; arch?: ("arm64" | "x64")[] };
   limits?: { memoryMb?: number };
 }
 
@@ -46,13 +55,13 @@ export interface BlockSummary {
 }
 
 export interface Problem {
-  step: "manifest" | "files" | "load" | "runtime" | "render";
+  step: "manifest" | "files" | "backend" | "load" | "runtime" | "render";
   message: string;
   file?: string;
 }
 
 export const ID_PATTERN = /^[a-z0-9][a-z0-9-]{1,47}$/;
-export const TEMPLATES = ["blank", "text-tool", "image-tool", "three-viewer"] as const;
+export const TEMPLATES = ["blank", "text-tool", "image-tool", "three-viewer", "python-tool", "swift-tool"] as const;
 export type TemplateName = (typeof TEMPLATES)[number];
 
 const ajv = new Ajv({ allErrors: true, strict: false });
@@ -66,21 +75,33 @@ export function effectivePermissions(m: BlockManifest): Required<BlockPermission
   };
 }
 
-/** Stable hash of a block's permissions; approvals are tied to it so edits re-prompt. */
+/** Stable hash of a block's permissions + backend command; approvals are tied to it so edits re-prompt. */
 export function permissionsHash(m: BlockManifest): string {
   const p = effectivePermissions(m);
-  const norm = JSON.stringify({ fs: p.fs, network: Array.isArray(p.network) ? [...p.network].sort() : p.network, clipboard: p.clipboard });
+  const b = m.mode === "polyglot" && m.backend
+    ? { language: m.backend.language, protocol: m.backend.protocol ?? "stdio", build: m.backend.build ?? null, run: m.backend.run }
+    : null;
+  const norm = JSON.stringify({
+    fs: p.fs,
+    network: Array.isArray(p.network) ? [...p.network].sort() : p.network,
+    clipboard: p.clipboard,
+    backend: b,
+  });
   return crypto.createHash("sha256").update(norm).digest("hex").slice(0, 16);
 }
 
 export function needsApproval(m: BlockManifest): boolean {
   const p = effectivePermissions(m);
-  return p.fs !== "none" || p.network !== false || p.clipboard;
+  return p.fs !== "none" || p.network !== false || p.clipboard || (m.mode === "polyglot" && !!m.backend);
 }
 
 export function describePermissions(m: BlockManifest): string[] {
   const p = effectivePermissions(m);
   const out: string[] = [];
+  if (m.mode === "polyglot" && m.backend) {
+    const cmd = Array.isArray(m.backend.run) ? m.backend.run.join(" ") : m.backend.run;
+    out.push(`Run local ${m.backend.language} backend (${cmd})`);
+  }
   if (p.fs === "user-picked-files") out.push("Read and write files that you pick in a file dialog");
   if (p.network === true) out.push("Connect to any HTTPS website");
   else if (Array.isArray(p.network) && p.network.length) out.push(`Connect to: ${p.network.join(", ")}`);
@@ -108,8 +129,10 @@ export function readManifest(codeDir: string): { manifest?: BlockManifest; probl
   }
   const manifest = json as unknown as BlockManifest;
   const problems: Problem[] = [];
-  if (manifest.backend !== undefined) {
-    problems.push({ step: "manifest", file: "block.json", message: "'backend' is reserved for Mode 2 and not supported by this host yet. Remove it and do the work in the web UI." });
+  if (manifest.mode === "polyglot" && !manifest.backend) {
+    problems.push({ step: "manifest", file: "block.json", message: "'mode' is 'polyglot' but 'backend' configuration is missing in block.json." });
+  } else if (manifest.mode === "web" && manifest.backend !== undefined) {
+    problems.push({ step: "manifest", file: "block.json", message: "'backend' is defined in block.json, so 'mode' must be set to 'polyglot' (or remove 'backend' for a pure web block)." });
   }
   return { manifest, problems };
 }
@@ -125,20 +148,66 @@ export function staticCheck(codeDir: string, expectedId?: string): { manifest?: 
   if (!entry || !fs.existsSync(entry)) {
     problems.push({ step: "files", file: manifest.entry.ui, message: `entry.ui file '${manifest.entry.ui}' does not exist` });
   }
-  // Remote resources are blocked by the sandbox; catch them early with a readable message.
+  if (manifest.entry.script) {
+    const scriptPath = safeJoin(codeDir, manifest.entry.script);
+    if (!scriptPath || !fs.existsSync(scriptPath)) {
+      problems.push({ step: "files", file: manifest.entry.script, message: `entry.script file '${manifest.entry.script}' does not exist` });
+    }
+  }
+
+  // Remote sub-resources are blocked by the sandbox; catch them early without flagging <a href="https://..."> links.
   for (const f of walk(codeDir)) {
-    if (!/\.(html|css|js|mjs)$/.test(f)) continue;
+    if (!/\.(html|css|js|mjs|ts|tsx)$/.test(f)) continue;
     const rel = path.relative(codeDir, f);
+    if (rel.startsWith("backend" + path.sep) || rel.startsWith(".bin" + path.sep)) continue;
     const text = fs.readFileSync(f, "utf8");
-    const remote = text.match(/(?:src|href)\s*=\s*["'](https?:)?\/\/[^"']+["']|@import\s+url\(\s*["']?https?:|from\s+["']https?:\/\/[^"']+["']|import\s*\(\s*["']https?:/);
-    if (remote) {
-      problems.push({ step: "files", file: rel, message: `Loads a remote resource (${remote[0].slice(0, 80)}). Blocks run offline in a sandbox: vendor the file into the block folder instead.` });
-    }
-    if (/\.(html)$/.test(f) && /<script(?![^>]*\bsrc=)[^>]*>\s*\S/.test(text)) {
-      problems.push({ step: "files", file: rel, message: "Inline <script> is blocked by the block Content Security Policy. Move the code into a .js file and load it with <script src>." });
-    }
-    if (/\son[a-z]+\s*=\s*["']/i.test(text) && /\.(html)$/.test(f)) {
-      problems.push({ step: "files", file: rel, message: "Inline event handler attributes (onclick=...) are blocked by the CSP. Use addEventListener in a .js file." });
+
+    if (/\.html$/.test(f)) {
+      const noComments = text.replace(/<!--[\s\S]*?-->/g, "");
+      const remoteSub = noComments.match(
+        /<(?:script|img|iframe|audio|video|source|embed|track)\b[^>]*\bsrc\s*=\s*["'](https?:)?\/\/[^"']+["']|<link\b[^>]*\bhref\s*=\s*["'](https?:)?\/\/[^"']+["']/i,
+      );
+      if (remoteSub) {
+        problems.push({
+          step: "files",
+          file: rel,
+          message: `Loads a remote resource (${remoteSub[0].slice(0, 80)}). Blocks run offline in a sandbox: vendor the file into the block folder instead.`,
+        });
+      }
+      if (/<script(?![^>]*\bsrc=)[^>]*>\s*\S/i.test(noComments)) {
+        problems.push({
+          step: "files",
+          file: rel,
+          message: "Inline <script> is blocked by the block Content Security Policy. Move the code into a .js file and load it with <script src>.",
+        });
+      }
+      // Check actual HTML start tags for inline event attributes (onclick=...)
+      const withoutScriptsAndStyles = noComments.replace(/<(script|style|code|pre)\b[^>]*>[\s\S]*?<\/\1>/gi, "");
+      if (/<[a-zA-Z][a-zA-Z0-9-]*\b[^>]*\son[a-z]+\s*=\s*["']/i.test(withoutScriptsAndStyles)) {
+        problems.push({
+          step: "files",
+          file: rel,
+          message: "Inline event handler attributes (onclick=...) are blocked by the CSP. Use addEventListener in a .js file.",
+        });
+      }
+    } else if (/\.css$/.test(f)) {
+      const remoteCss = text.match(/@import\s+(?:url\(\s*)?["']?(https?:)?\/\/[^"')\s]+|url\(\s*["']?(https?:)?\/\/[^"')\s]+/i);
+      if (remoteCss) {
+        problems.push({
+          step: "files",
+          file: rel,
+          message: `Loads a remote CSS resource (${remoteCss[0].slice(0, 80)}). Vendor fonts/styles into the block folder instead.`,
+        });
+      }
+    } else if (/\.(js|mjs|ts|tsx)$/.test(f)) {
+      const remoteImport = text.match(/\bfrom\s+["'](https?:)?\/\/[^"']+["']|\bimport\s*\(\s*["'](https?:)?\/\/[^"']+["']/);
+      if (remoteImport) {
+        problems.push({
+          step: "files",
+          file: rel,
+          message: `Imports a remote module (${remoteImport[0].slice(0, 80)}). Vendor the library into the block folder instead.`,
+        });
+      }
     }
   }
   return { manifest, problems };
@@ -146,10 +215,10 @@ export function staticCheck(codeDir: string, expectedId?: string): { manifest?: 
 
 function* walk(dir: string): Generator<string> {
   for (const ent of fs.readdirSync(dir, { withFileTypes: true })) {
-    if (ent.name === ".git" || ent.name === "node_modules") continue;
+    if (ent.name === ".git" || ent.name === "node_modules" || ent.name === ".bin" || ent.name === "__pycache__" || ent.name === "target") continue;
     const p = path.join(dir, ent.name);
     if (ent.isDirectory()) yield* walk(p);
-    else if (ent.isFile() && fs.statSync(p).size < 2_000_000) yield p;
+    else if (ent.isFile() && fs.statSync(p).size < 5_000_000) yield p;
   }
 }
 
@@ -185,6 +254,17 @@ export function uniqueId(base: string): string {
   let n = 2;
   while (fs.existsSync(paths.blockDir(id))) id = `${slugify(base).slice(0, 44)}-${n++}`;
   return id;
+}
+
+/** Pick the best starter template based on a natural-language prompt. */
+export function suggestTemplate(request: string, hasPython = true, hasSwift = true): TemplateName {
+  const q = request.toLowerCase();
+  if (/\b(swift|macos native|appkit|metal|coreaudio|vision framework|apple)\b/.test(q) && hasSwift) return "swift-tool";
+  if (/\b(python|opencv|ffmpeg|video|audio|whisper|pytorch|numpy|pandas|csv|data science|ocr|ai|ml|scrape|pdf)\b/.test(q) && hasPython) return "python-tool";
+  if (/\b(3d|stl|obj|gltf|mesh|webgl|three\.?js|shader|voxel|orbit|cad|model viewer)\b/.test(q)) return "three-viewer";
+  if (/\b(image|photo|pixel|sprite|color|palette|filter|crop|resize|lut|png|jpg|canvas)\b/.test(q)) return "image-tool";
+  if (/\b(markdown|text|note|word|editor|writer|json|yaml|diff|log|regex)\b/.test(q)) return "text-tool";
+  return "blank";
 }
 
 export function createBlock(opts: { id: string; name?: string; description?: string; template?: TemplateName }): BlockManifest {
@@ -226,9 +306,13 @@ export function deleteBlockToTrash(id: string): string {
 let gitOk: boolean | undefined;
 function hasGit(): boolean {
   if (gitOk !== undefined) return gitOk;
-  // Calling /usr/bin/git without Command Line Tools pops an install dialog, so check first.
-  const sel = spawnSync("xcode-select", ["-p"], { stdio: "ignore" });
-  gitOk = sel.status === 0 && spawnSync("git", ["--version"], { stdio: "ignore" }).status === 0;
+  if (process.platform === "darwin") {
+    // Calling /usr/bin/git without Command Line Tools pops an install dialog, so check first.
+    const sel = spawnSync("xcode-select", ["-p"], { stdio: "ignore" });
+    gitOk = sel.status === 0 && spawnSync("git", ["--version"], { stdio: "ignore" }).status === 0;
+  } else {
+    gitOk = spawnSync("git", ["--version"], { stdio: "ignore" }).status === 0;
+  }
   return gitOk;
 }
 
@@ -249,6 +333,7 @@ export interface HistoryEntry {
 export const history = {
   snapshot(id: string, message: string): void {
     const code = paths.codeDir(id);
+    if (!fs.existsSync(code)) return;
     if (hasGit()) {
       if (!fs.existsSync(path.join(code, ".git"))) git(code, ["init", "-q", "-b", "main"]);
       git(code, ["add", "-A"]);
@@ -263,20 +348,27 @@ export const history = {
 
   list(id: string): HistoryEntry[] {
     const code = paths.codeDir(id);
+    if (!fs.existsSync(code)) return [];
     if (hasGit() && fs.existsSync(path.join(code, ".git"))) {
       const out = git(code, ["log", "--format=%H%x09%ct%x09%s", "-n", "50"]).trim();
-      return out ? out.split("\n").map((l) => {
-        const [ref, ct, ...msg] = l.split("\t");
-        return { ref, at: Number(ct) * 1000, message: msg.join("\t") };
-      }) : [];
+      return out
+        ? out.split("\n").map((l) => {
+            const [ref, ct, ...msg] = l.split("\t");
+            return { ref, at: Number(ct) * 1000, message: msg.join("\t") };
+          })
+        : [];
     }
     const dir = path.join(paths.metaDir(id), "snapshots");
     if (!fs.existsSync(dir)) return [];
-    return fs.readdirSync(dir).sort().reverse().map((ts) => ({
-      ref: ts,
-      at: Number(ts),
-      message: fs.readFileSync(path.join(dir, ts, "message.txt"), "utf8"),
-    }));
+    return fs
+      .readdirSync(dir)
+      .sort()
+      .reverse()
+      .map((ts) => ({
+        ref: ts,
+        at: Number(ts),
+        message: fs.readFileSync(path.join(dir, ts, "message.txt"), "utf8"),
+      }));
   },
 
   /**
@@ -286,15 +378,33 @@ export const history = {
    */
   undoLastAiChange(id: string): string | null {
     const entries = history.list(id); // newest first
-    const undone = new Set(entries.filter((e) => e.message.startsWith("Undo AI change ")).map((e) => e.message.slice("Undo AI change ".length).split(" ")[0]));
-    const idx = entries.findIndex((e) => e.message.startsWith("AI: ") && !undone.has(e.ref.slice(0, 12)));
+    const undone = new Set(
+      entries
+        .filter((e) => e.message.startsWith("Undo AI change "))
+        .map((e) => e.message.slice("Undo AI change ".length).split(" ")[0]),
+    );
+    // If a snapshot was restored explicitly, don't reach past that restore point for automatic AI undo.
+    const restoreIdx = entries.findIndex((e) => e.message.startsWith("Restore snapshot "));
+    const searchSpace = restoreIdx >= 0 ? entries.slice(0, restoreIdx) : entries;
+
+    const idx = searchSpace.findIndex((e) => e.message.startsWith("AI: ") && !undone.has(e.ref.slice(0, 12)));
     if (idx < 0) return null;
-    const target = entries[idx];
+    const target = searchSpace[idx];
     const before = entries.slice(idx + 1).find((e) => e.message.startsWith("Before AI: "));
     if (!before) return null;
     history.restore(id, before.ref);
     history.snapshot(id, `Undo AI change ${target.ref.slice(0, 12)} (${target.message.slice(4, 80)})`);
     return target.message;
+  },
+
+  /** Restore a specific snapshot from the history UI and record a commit. */
+  restoreTo(id: string, ref: string): HistoryEntry | null {
+    const entries = history.list(id);
+    const target = entries.find((e) => e.ref === ref || e.ref.startsWith(ref));
+    if (!target) return null;
+    history.restore(id, target.ref);
+    history.snapshot(id, `Restore snapshot ${target.ref.slice(0, 12)} (${target.message.slice(0, 60)})`);
+    return target;
   },
 
   restore(id: string, ref: string): void {

@@ -1,0 +1,29 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Python Data Lab</title>
+    <link rel="stylesheet" href="style.css" />
+  </head>
+  <body>
+    <header class="bar">
+      <strong id="title">Python Data Lab</strong>
+      <span class="badge" id="runtime">Python 3</span>
+      <span class="spacer"></span>
+      <button id="open">Open File…</button>
+      <button id="run" class="primary">Analyze in Python</button>
+    </header>
+    <main class="split">
+      <section class="pane">
+        <label for="input">Input Data / Text / Numbers</label>
+        <textarea id="input" spellcheck="false" placeholder="Paste text, CSV values or numbers to analyze with Python…"></textarea>
+      </section>
+      <section class="pane">
+        <label>Python Analysis Result</label>
+        <div id="cards" class="cards"></div>
+        <pre id="output" class="output"></pre>
+      </section>
+    </main>
+    <script type="module" src="main.js"></script>
+  </body>
+</html>

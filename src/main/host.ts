@@ -1,7 +1,20 @@
 import fs from "node:fs";
 import net from "node:net";
+import os from "node:os";
 import path from "node:path";
-import { app, BrowserWindow, dialog, ipcMain, Menu, nativeImage, shell, WebContentsView, type IpcMainInvokeEvent, type Rectangle } from "electron";
+import {
+  app,
+  BrowserWindow,
+  dialog,
+  ipcMain,
+  Menu,
+  nativeImage,
+  nativeTheme,
+  shell,
+  WebContentsView,
+  type IpcMainInvokeEvent,
+  type Rectangle,
+} from "electron";
 import {
   createBlock,
   deleteBlockToTrash,
@@ -11,15 +24,18 @@ import {
   needsApproval,
   permissionsHash,
   staticCheck,
+  suggestTemplate,
   TEMPLATES,
   uniqueId,
   type BlockManifest,
   type TemplateName,
 } from "../shared/blocks";
-import { APP_ROOT, bbHome, paths } from "../shared/paths";
+import { APP_ROOT, IS_PACKAGED, SKILL_PATH, bbHome, paths } from "../shared/paths";
 import { detectAgents, runAgentJob, type AgentId, type AgentJob } from "./agent";
-import { setBlockLogSink } from "./bbApi";
+import { clearBlockHandles, setBlockLogSink } from "./bbApi";
+import { detectRuntimes } from "./runtimes";
 import { blockContexts, blockSession, blockUrl, blockWebPreferences, consoleDetails, lockNavigation, type BlockContext } from "./sandbox";
+import { backendKey, ensureBackend, stopAllBackends, stopBackend } from "./supervisor";
 import { validateBlock } from "./validate";
 
 const DIST = path.join(APP_ROOT, "dist");
@@ -37,7 +53,9 @@ interface Settings {
 let win: BrowserWindow | null = null;
 const views = new Map<string, OpenView>();
 let activeId: string | null = null;
-let viewBounds: Rectangle = { x: 0, y: 0, width: 0, height: 0 };
+let splitId: string | null = null;
+let primaryBounds: Rectangle = { x: 0, y: 0, width: 0, height: 0 };
+let secondaryBounds: Rectangle | null = null;
 const jobs = new Map<string, { job: AgentJob; blockId: string }>();
 const logs = new Map<string, { at: number; level: string; text: string }[]>();
 let jobSeq = 0;
@@ -57,8 +75,7 @@ function writeJson(file: string, value: unknown) {
   fs.writeFileSync(file, JSON.stringify(value, null, 2));
 }
 function settings(): Settings {
-  const s = readJson<Settings>(paths.settingsFile(), { agent: "claude" });
-  return s;
+  return readJson<Settings>(paths.settingsFile(), { agent: "claude" });
 }
 
 async function ensureApproved(m: BlockManifest): Promise<boolean> {
@@ -69,7 +86,7 @@ async function ensureApproved(m: BlockManifest): Promise<boolean> {
   const opts = {
     type: "question" as const,
     message: `Allow “${m.name}” to:`,
-    detail: describePermissions(m).map((l) => `•  ${l}`).join("\n") + "\n\nYou'll be asked again if the block's permissions change.",
+    detail: describePermissions(m).map((l) => `•  ${l}`).join("\n") + "\n\nYou'll be asked again if the block's permissions or backend command change.",
     buttons: ["Allow", "Don’t Allow"],
     defaultId: 0,
     cancelId: 1,
@@ -94,19 +111,24 @@ function pushLog(id: string, level: string, text: string) {
 }
 setBlockLogSink(pushLog);
 
+function viewBgColor(): string {
+  return nativeTheme.shouldUseDarkColors ? "#0b1120" : "#ffffff";
+}
+
 function loadManifestOrThrow(id: string): BlockManifest {
   const { manifest, problems } = staticCheck(paths.codeDir(id), id);
   if (!manifest) throw new Error(problems.map((p) => p.message).join("; ") || "block.json is invalid");
-  const fatal = problems.filter((p) => p.step === "manifest" || p.step === "files" && /entry\.ui/.test(p.message));
+  const fatal = problems.filter((p) => p.step === "manifest" || (p.step === "files" && /entry\.ui/.test(p.message)));
   if (fatal.length) throw new Error(fatal.map((p) => p.message).join("; "));
   return manifest;
 }
 
-async function openBlock(id: string): Promise<BlockManifest> {
+async function openBlock(id: string, asSplit = false): Promise<BlockManifest> {
   if (!win) throw new Error("no window");
   const existing = views.get(id);
   if (existing) {
-    showBlock(id);
+    if (asSplit && activeId && activeId !== id) showBlock(activeId, id);
+    else showBlock(id, splitId === id ? null : splitId);
     return existing.ctx.manifest;
   }
   const manifest = loadManifestOrThrow(id);
@@ -114,14 +136,15 @@ async function openBlock(id: string): Promise<BlockManifest> {
 
   const partition = `persist:block-${id}`;
   const codeDir = paths.codeDir(id);
+  const dataDir = paths.dataDir(id);
   blockSession(partition, id, codeDir);
-  fs.mkdirSync(paths.dataDir(id), { recursive: true });
+  fs.mkdirSync(dataDir, { recursive: true });
   fs.mkdirSync(paths.metaDir(id), { recursive: true });
 
   const view = new WebContentsView({ webPreferences: blockWebPreferences(partition, BLOCK_PRELOAD) });
-  view.setBackgroundColor("#ffffff");
+  view.setBackgroundColor(viewBgColor());
   const wc = view.webContents;
-  const ctx: BlockContext = { blockId: id, codeDir, dataDir: paths.dataDir(id), manifest, validating: false, ready: false };
+  const ctx: BlockContext = { blockId: id, codeDir, dataDir, manifest, validating: false, ready: false };
   blockContexts.set(wc, ctx);
   lockNavigation(wc, id);
   wc.on("console-message", (...args: unknown[]) => {
@@ -137,27 +160,63 @@ async function openBlock(id: string): Promise<BlockManifest> {
     if (code !== -3) pushLog(id, "error", `Failed to load ${url}: ${desc}`);
   });
 
+  if (manifest.mode === "polyglot" && manifest.backend) {
+    try {
+      await ensureBackend({ key: backendKey(id, wc.id, false), blockId: id, wcId: wc.id, codeDir, dataDir, manifest });
+    } catch (e) {
+      pushLog(id, "error", `Backend startup failed: ${(e as Error).message}`);
+    }
+  }
+
   views.set(id, { view, ctx });
   win.contentView.addChildView(view);
-  view.setBounds(viewBounds);
-  showBlock(id);
+  if (asSplit && activeId && activeId !== id) showBlock(activeId, id);
+  else showBlock(id, splitId === id ? null : splitId);
+  applyViewBounds();
   await wc.loadURL(blockUrl(manifest)).catch((e) => pushLog(id, "error", String(e.message ?? e)));
   return manifest;
 }
 
-function showBlock(id: string | null) {
+function applyViewBounds() {
+  for (const [vid, v] of views) {
+    if (vid === activeId) {
+      v.view.setBounds(primaryBounds);
+      v.view.setVisible(true);
+    } else if (vid === splitId && secondaryBounds) {
+      v.view.setBounds(secondaryBounds);
+      v.view.setVisible(true);
+    } else {
+      v.view.setVisible(false);
+    }
+  }
+}
+
+function showBlock(id: string | null, nextSplitId?: string | null) {
   activeId = id && views.has(id) ? id : null;
-  for (const [vid, v] of views) v.view.setVisible(vid === activeId);
+  if (nextSplitId !== undefined) {
+    splitId = nextSplitId && views.has(nextSplitId) && nextSplitId !== activeId ? nextSplitId : null;
+  } else if (!activeId || splitId === activeId) {
+    splitId = null;
+  }
+  applyViewBounds();
   if (activeId) views.get(activeId)!.view.webContents.focus();
 }
 
 function closeBlock(id: string) {
   const v = views.get(id);
   if (!v) return;
+  stopBackend(backendKey(id, v.view.webContents.id, false));
+  clearBlockHandles(id);
   win?.contentView.removeChildView(v.view);
   v.view.webContents.close();
   views.delete(id);
-  if (activeId === id) activeId = null;
+  if (activeId === id) {
+    activeId = splitId;
+    splitId = null;
+  } else if (splitId === id) {
+    splitId = null;
+  }
+  applyViewBounds();
 }
 
 async function reloadBlock(id: string): Promise<void> {
@@ -176,8 +235,24 @@ async function reloadBlock(id: string): Promise<void> {
     win?.webContents.send("host:block-closed", { id });
     return;
   }
+  const bKey = backendKey(id, v.view.webContents.id, false);
+  stopBackend(bKey);
   v.ctx.manifest = manifest;
   v.ctx.ready = false;
+  if (manifest.mode === "polyglot" && manifest.backend) {
+    try {
+      await ensureBackend({
+        key: bKey,
+        blockId: id,
+        wcId: v.view.webContents.id,
+        codeDir: v.ctx.codeDir,
+        dataDir: v.ctx.dataDir,
+        manifest,
+      });
+    } catch (e) {
+      pushLog(id, "error", `Backend restart failed: ${(e as Error).message}`);
+    }
+  }
   await v.view.webContents.loadURL(blockUrl(manifest)).catch(() => {});
 }
 
@@ -211,6 +286,8 @@ function blockList() {
     description: b.manifest?.description ?? "",
     icon: b.manifest?.icon ?? "▦",
     version: b.manifest?.version ?? "",
+    mode: b.manifest?.mode ?? "web",
+    language: b.manifest?.backend?.language ?? null,
     permissions: b.manifest ? describePermissions(b.manifest) : [],
     open: views.has(b.id),
     building: running.has(b.id),
@@ -234,7 +311,7 @@ function watchBlocks() {
       if (!file) return;
       const parts = file.split(path.sep);
       const id = parts[0];
-      if (parts[1] === "code" && parts[2] !== ".git") {
+      if (parts[1] === "code" && parts[2] !== ".git" && parts[2] !== ".bin") {
         if (parts.length === 3 && parts[2] === "block.json") notifyBlocksChanged();
         if (views.has(id) && ![...jobs.values()].some((j) => j.blockId === id)) {
           clearTimeout(reloadTimers.get(id));
@@ -248,14 +325,16 @@ function watchBlocks() {
 }
 
 // ---------------------------------------------------------------------------
-// CLI bridge: a Unix socket (owner-only permissions) so `bassblock run/reload` reach the running host
+// CLI bridge: a Unix socket (or Windows Named Pipe) so `bassblock run/reload` reach the running host
 // ---------------------------------------------------------------------------
 function startSocketServer() {
   const sock = paths.hostSocket();
-  fs.mkdirSync(path.dirname(sock), { recursive: true });
-  try {
-    fs.unlinkSync(sock);
-  } catch {}
+  if (process.platform !== "win32") {
+    fs.mkdirSync(path.dirname(sock), { recursive: true });
+    try {
+      fs.unlinkSync(sock);
+    } catch {}
+  }
   const server = net.createServer((c) => {
     let buf = "";
     c.on("data", async (d) => {
@@ -272,14 +351,21 @@ function startSocketServer() {
       c.end(JSON.stringify(reply) + "\n");
     });
   });
-  // Not fatal: without the socket only `bassblock run/reload` from a terminal stop working.
   server.on("error", (e) => console.error(`[bassblock] CLI socket unavailable at ${sock}: ${e.message}`));
-  server.listen(sock, () => fs.chmodSync(sock, 0o600));
+  server.listen(sock, () => {
+    if (process.platform !== "win32") {
+      try {
+        fs.chmodSync(sock, 0o600);
+      } catch {}
+    }
+  });
   app.on("will-quit", () => {
     server.close();
-    try {
-      fs.unlinkSync(sock);
-    } catch {}
+    if (process.platform !== "win32") {
+      try {
+        fs.unlinkSync(sock);
+      } catch {}
+    }
   });
 }
 
@@ -313,16 +399,60 @@ function focusWindow() {
 }
 
 /** Put a `bassblock` command where agents (and the user) can find it. Runs the CLI with this app's Electron. */
-function installCliShim() {
-  const bin = path.join(paths.binDir(), "bassblock");
+export function installCliShim(): string {
   fs.mkdirSync(paths.binDir(), { recursive: true });
+  const cliJs = path.join(DIST, "cli.js");
+  if (process.platform === "win32") {
+    const cmdFile = path.join(paths.binDir(), "bassblock.cmd");
+    const content = `@echo off\r\nset ELECTRON_RUN_AS_NODE=1\r\nset BB_ELECTRON=${process.execPath}\r\n"${process.execPath}" "${cliJs}" %*\r\n`;
+    if (!fs.existsSync(cmdFile) || fs.readFileSync(cmdFile, "utf8") !== content) {
+      fs.writeFileSync(cmdFile, content);
+    }
+    return cmdFile;
+  }
+  const bin = path.join(paths.binDir(), "bassblock");
   const script = `#!/bin/sh
 # Generated by BASS BLOCK. Runs the bassblock CLI using the app's bundled runtime.
-ELECTRON_RUN_AS_NODE=1 BB_ELECTRON="${process.execPath}" exec "${process.execPath}" "${path.join(DIST, "cli.js")}" "$@"
+ELECTRON_RUN_AS_NODE=1 BB_ELECTRON="${process.execPath}" exec "${process.execPath}" "${cliJs}" "$@"
 `;
   if (!fs.existsSync(bin) || fs.readFileSync(bin, "utf8") !== script) {
     fs.writeFileSync(bin, script, { mode: 0o755 });
   }
+  return bin;
+}
+
+/**
+ * Install the `bass-block-builder` skill and `bassblock` CLI shim into standard external
+ * agent discovery directories (Antigravity, Claude Code, and ~/.local/bin).
+ */
+export function installExternalSkill(): { installed: string[] } {
+  const binShim = installCliShim();
+  const home = os.homedir();
+  const installed: string[] = [binShim];
+
+  const skillTargets = [
+    path.join(home, ".gemini", "antigravity", "skills", "bass-block-builder", "SKILL.md"),
+    path.join(home, ".claude", "skills", "bass-block-builder", "SKILL.md"),
+  ];
+  const skillContent = fs.readFileSync(SKILL_PATH, "utf8");
+  for (const target of skillTargets) {
+    try {
+      fs.mkdirSync(path.dirname(target), { recursive: true });
+      fs.writeFileSync(target, skillContent, "utf8");
+      installed.push(target);
+    } catch {}
+  }
+
+  if (process.platform !== "win32") {
+    const localBin = path.join(home, ".local", "bin", "bassblock");
+    try {
+      fs.mkdirSync(path.dirname(localBin), { recursive: true });
+      if (fs.existsSync(localBin)) fs.unlinkSync(localBin);
+      fs.symlinkSync(binShim, localBin);
+      installed.push(localBin);
+    } catch {}
+  }
+  return { installed };
 }
 
 // ---------------------------------------------------------------------------
@@ -336,13 +466,24 @@ function hostHandle(channel: string, fn: (...args: any[]) => unknown) {
 }
 
 function guessName(request: string): string {
-  const words = request.replace(/^(a|an|the|make|create|build|me|i want|i need)\s+/gi, "").replace(/[^\p{L}\p{N}\s-]/gu, " ").trim().split(/\s+/).slice(0, 4);
+  const words = request
+    .replace(/^(a|an|the|make|create|build|me|i want|i need)\s+/gi, "")
+    .replace(/[^\p{L}\p{N}\s-]/gu, " ")
+    .trim()
+    .split(/\s+/)
+    .slice(0, 4);
   const s = words.join(" ");
   return s ? s[0].toUpperCase() + s.slice(1) : "New block";
 }
 
 function installHostIpc() {
-  hostHandle("host:info", () => ({ home: bbHome(), version: app.getVersion(), templates: TEMPLATES, platform: process.platform, arch: process.arch }));
+  hostHandle("host:info", () => ({
+    home: bbHome(),
+    version: app.getVersion(),
+    templates: TEMPLATES,
+    platform: process.platform,
+    arch: process.arch,
+  }));
   hostHandle("host:listBlocks", () => blockList());
   hostHandle("host:getSettings", () => settings());
   hostHandle("host:setSettings", (patch: Partial<Settings>) => {
@@ -352,14 +493,16 @@ function installHostIpc() {
     return next;
   });
   hostHandle("host:detectAgents", () => detectAgents());
+  hostHandle("host:detectRuntimes", () => detectRuntimes(true));
+  hostHandle("host:installSkill", () => installExternalSkill());
   hostHandle("host:createFromTemplate", (name: string, template: TemplateName) => {
     const id = uniqueId(name || template);
     createBlock({ id, name: name || undefined, template });
     notifyBlocksChanged();
     return { id };
   });
-  hostHandle("host:openBlock", async (id: string) => {
-    const m = await openBlock(id);
+  hostHandle("host:openBlock", async (id: string, asSplit = false) => {
+    const m = await openBlock(id, Boolean(asSplit));
     notifyBlocksChanged();
     return { id: m.id, name: m.name, icon: m.icon ?? "▦", version: m.version };
   });
@@ -367,16 +510,47 @@ function installHostIpc() {
     closeBlock(id);
     notifyBlocksChanged();
   });
-  hostHandle("host:showBlock", (id: string | null) => showBlock(id));
-  hostHandle("host:setViewBounds", (r: Rectangle) => {
-    viewBounds = { x: Math.round(r.x), y: Math.round(r.y), width: Math.max(0, Math.round(r.width)), height: Math.max(0, Math.round(r.height)) };
-    for (const v of views.values()) v.view.setBounds(viewBounds);
+  hostHandle("host:showBlock", (id: string | null, nextSplitId?: string | null) => showBlock(id, nextSplitId));
+  hostHandle("host:capturePreview", async () => {
+    if (!activeId || !views.has(activeId)) return null;
+    try {
+      const img = await views.get(activeId)!.view.webContents.capturePage();
+      if (img.isEmpty()) return null;
+      return "data:image/jpeg;base64," + img.toJPEG(82).toString("base64");
+    } catch {
+      return null;
+    }
+  });
+  hostHandle("host:setViewBounds", (primary: Rectangle, secondary?: Rectangle | null) => {
+    primaryBounds = {
+      x: Math.round(primary.x),
+      y: Math.round(primary.y),
+      width: Math.max(0, Math.round(primary.width)),
+      height: Math.max(0, Math.round(primary.height)),
+    };
+    secondaryBounds = secondary
+      ? {
+          x: Math.round(secondary.x),
+          y: Math.round(secondary.y),
+          width: Math.max(0, Math.round(secondary.width)),
+          height: Math.max(0, Math.round(secondary.height)),
+        }
+      : null;
+    applyViewBounds();
   });
   hostHandle("host:reloadBlock", (id: string) => reloadBlock(id));
   hostHandle("host:devtools", (id: string) => views.get(id)?.view.webContents.toggleDevTools());
   hostHandle("host:logs", (id: string) => logs.get(id) ?? []);
   hostHandle("host:clearLogs", (id: string) => logs.set(id, []));
   hostHandle("host:history", (id: string) => history.list(id));
+  hostHandle("host:restoreHistory", async (id: string, ref: string) => {
+    const restored = history.restoreTo(id, ref);
+    if (restored) {
+      await reloadBlock(id);
+      notifyBlocksChanged();
+    }
+    return restored;
+  });
   hostHandle("host:undoAi", async (id: string) => {
     const undone = history.undoLastAiChange(id);
     if (undone) {
@@ -421,44 +595,74 @@ function installHostIpc() {
     if (!agent?.path) throw new Error(`${agent?.label ?? agentId} isn't installed (or not on your PATH).`);
     let blockId = req.id;
     if (req.kind === "create") {
+      const runtimes = detectRuntimes();
+      const hasPython = Boolean(runtimes.find((r) => r.id === "python")?.path);
+      const hasSwift = Boolean(runtimes.find((r) => r.id === "swift")?.path);
+      const template = suggestTemplate(request, hasPython, hasSwift);
       blockId = uniqueId(guessName(request));
-      createBlock({ id: blockId, name: guessName(request), description: request.slice(0, 400), template: "blank" });
+      createBlock({ id: blockId, name: guessName(request), description: request.slice(0, 400), template });
       notifyBlocksChanged();
     }
     if (!blockId || !fs.existsSync(paths.codeDir(blockId))) throw new Error("Block not found");
     if ([...jobs.values()].some((j) => j.blockId === blockId)) throw new Error("An AI job is already running for this block.");
     const jobId = `job-${++jobSeq}`;
     const id = blockId;
+    const isNewCreate = req.kind === "create";
     const job = runAgentJob({
       agent: agentId,
       agentPath: agent.path,
       blockId: id,
       kind: req.kind,
       request,
-      validate: () => validateBlock(paths.codeDir(id), { blockPreload: BLOCK_PRELOAD, expectedId: id, screenshotPath: path.join(paths.metaDir(id), "screenshot.png") }),
+      validate: () =>
+        validateBlock(paths.codeDir(id), {
+          blockPreload: BLOCK_PRELOAD,
+          expectedId: id,
+          screenshotPath: path.join(paths.metaDir(id), "screenshot.png"),
+        }),
       onEvent: (event) => win?.webContents.send("host:agent-event", { jobId, blockId: id, event }),
     });
     jobs.set(jobId, { job, blockId: id });
-    job.done.finally(async () => {
-      jobs.delete(jobId);
-      if (views.has(id)) await reloadBlock(id);
-      notifyBlocksChanged();
-    });
+    job.done.then(
+      async (res) => {
+        jobs.delete(jobId);
+        if (isNewCreate && res.cancelled) {
+          closeBlock(id);
+          try {
+            fs.rmSync(paths.blockDir(id), { recursive: true, force: true });
+          } catch {}
+        } else if (views.has(id)) {
+          await reloadBlock(id);
+        }
+        notifyBlocksChanged();
+      },
+      () => {
+        jobs.delete(jobId);
+        notifyBlocksChanged();
+      },
+    );
     notifyBlocksChanged();
     return { jobId, blockId: id };
   });
+
   // Native menus: they draw above block views, which HTML popovers can't.
   hostHandle("host:popupMenu", (items: { id?: string; label?: string; separator?: boolean; enabled?: boolean }[]) =>
     new Promise<string | null>((resolve) => {
       const menu = Menu.buildFromTemplate(
-        items.map((i) => (i.separator ? { type: "separator" as const } : { label: i.label ?? "", enabled: i.enabled !== false, click: () => resolve(i.id ?? null) })),
+        items.map((i) =>
+          i.separator ? { type: "separator" as const } : { label: i.label ?? "", enabled: i.enabled !== false, click: () => resolve(i.id ?? null) },
+        ),
       );
       menu.popup({ window: win!, callback: () => setTimeout(() => resolve(null), 30) });
     }),
   );
-  hostHandle("host:cancelAgent",(jobId: string) => jobs.get(jobId)?.job.cancel());
+  hostHandle("host:cancelAgent", (jobId: string) => jobs.get(jobId)?.job.cancel());
   hostHandle("host:validate", (id: string) =>
-    validateBlock(paths.codeDir(id), { blockPreload: BLOCK_PRELOAD, expectedId: id, screenshotPath: path.join(paths.metaDir(id), "screenshot.png") }).then((r) => {
+    validateBlock(paths.codeDir(id), {
+      blockPreload: BLOCK_PRELOAD,
+      expectedId: id,
+      screenshotPath: path.join(paths.metaDir(id), "screenshot.png"),
+    }).then((r) => {
       notifyBlocksChanged();
       return r;
     }),
@@ -478,11 +682,24 @@ export function startHost(opts: { openId?: string; snapshot?: string }) {
   });
 
   app.whenReady().then(async () => {
+    if (opts.snapshot && (process.env.BB_THEME === "light" || process.env.BB_THEME === "dark")) nativeTheme.themeSource = process.env.BB_THEME;
+    if (!IS_PACKAGED) {
+      const devIcon = path.join(APP_ROOT, "build", "icon.png");
+      if (fs.existsSync(devIcon)) app.dock?.setIcon(devIcon);
+    }
     fs.mkdirSync(paths.blocksDir(), { recursive: true });
     installCliShim();
+    try {
+      installExternalSkill();
+    } catch {}
     installHostIpc();
     startSocketServer();
     watchBlocks();
+
+    nativeTheme.on("updated", () => {
+      const bg = viewBgColor();
+      for (const v of views.values()) v.view.setBackgroundColor(bg);
+    });
 
     win = new BrowserWindow({
       width: 1320,
@@ -490,11 +707,11 @@ export function startHost(opts: { openId?: string; snapshot?: string }) {
       minWidth: 900,
       minHeight: 560,
       title: "BASS BLOCK",
-      titleBarStyle: "hiddenInset",
+      titleBarStyle: process.platform === "darwin" ? "hiddenInset" : "default",
       trafficLightPosition: { x: 18, y: 18 },
-      vibrancy: "sidebar",
+      vibrancy: process.platform === "darwin" ? "sidebar" : undefined,
       visualEffectState: "followWindow",
-      backgroundColor: "#00000000",
+      backgroundColor: process.platform === "darwin" ? "#00000000" : viewBgColor(),
       show: !opts.snapshot,
       webPreferences: {
         preload: path.join(DIST, "preload-host.js"),
@@ -511,6 +728,7 @@ export function startHost(opts: { openId?: string; snapshot?: string }) {
     win.webContents.on("will-navigate", (e) => e.preventDefault());
     win.on("closed", () => {
       win = null;
+      stopAllBackends();
       for (const id of [...views.keys()]) views.delete(id);
     });
     process.env.BB_DEBUG && process.stderr.write("[host] ready\n");
@@ -531,10 +749,12 @@ export function startHost(opts: { openId?: string; snapshot?: string }) {
   app.on("activate", () => focusWindow());
   app.on("window-all-closed", () => {
     for (const { job } of jobs.values()) job.cancel();
+    stopAllBackends();
     app.quit();
   });
   app.on("before-quit", () => {
     for (const { job } of jobs.values()) job.cancel();
+    stopAllBackends();
   });
 }
 
@@ -560,6 +780,9 @@ function installAppMenu() {
           { label: "Reload Block", accelerator: "CmdOrCtrl+R", click: send("reload") },
           { label: "Modify with AI…", accelerator: "CmdOrCtrl+E", click: send("edit") },
           { label: "Undo Last AI Change", click: send("undo") },
+          { label: "Version History…", accelerator: "CmdOrCtrl+Y", click: send("history") },
+          { type: "separator" },
+          { label: "Toggle Split View…", accelerator: "CmdOrCtrl+\\", click: send("split") },
           { label: "Show Console", accelerator: "CmdOrCtrl+Alt+C", click: send("logs") },
           { label: "Block Developer Tools", accelerator: "CmdOrCtrl+Alt+I", click: send("devtools") },
         ],
@@ -577,6 +800,10 @@ function installAppMenu() {
 async function takeSnapshot(file: string) {
   const dbg = (m: string) => process.env.BB_DEBUG && process.stderr.write(`[snapshot] ${m}\n`);
   dbg("start");
+  if (process.env.BB_SNAPSHOT_JS) {
+    await win!.webContents.executeJavaScript(process.env.BB_SNAPSHOT_JS).catch((e) => dbg(`script failed: ${e}`));
+    await new Promise((r) => setTimeout(r, 700));
+  }
   await new Promise((r) => setTimeout(r, 1800));
   dbg("capturing");
   const img = await win!.webContents.capturePage();
@@ -584,10 +811,8 @@ async function takeSnapshot(file: string) {
   fs.writeFileSync(file, img.toPNG());
   if (activeId) {
     const v = views.get(activeId)!;
-    // Capturing a child view of a hidden window isn't supported by Chromium; skip if it fails.
     const bimg = await v.view.webContents.capturePage().catch(() => null);
-    if (bimg)
-    fs.writeFileSync(file.replace(/\.png$/, "-block.png"), bimg.toPNG());
+    if (bimg) fs.writeFileSync(file.replace(/\.png$/, "-block.png"), bimg.toPNG());
   }
   app.exit(0);
 }

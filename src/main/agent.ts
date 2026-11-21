@@ -4,9 +4,11 @@
  */
 import fs from "node:fs";
 import path from "node:path";
-import { spawn, execFileSync, type ChildProcess } from "node:child_process";
+import crypto from "node:crypto";
+import { spawn, type ChildProcess } from "node:child_process";
 import { history, type Problem } from "../shared/blocks";
 import { paths, SKILL_PATH, TEMPLATES_DIR } from "../shared/paths";
+import { findBinary, formatRuntimesForPrompt, userPath } from "./runtimes";
 
 export type AgentId = "claude" | "gemini" | "codex";
 export const AGENTS: { id: AgentId; label: string; bin: string }[] = [
@@ -22,35 +24,12 @@ export type AgentEvent =
   | { type: "log"; text: string }
   | { type: "done"; ok: boolean; problems: Problem[]; summary?: string; cancelled?: boolean };
 
-let loginPath: string | undefined;
-/** Apps started from Finder get a bare PATH; ask the login shell for the real one once. */
-export function userPath(): string {
-  if (loginPath) return loginPath;
-  const fallback = [path.join(process.env.HOME ?? "", ".local/bin"), "/opt/homebrew/bin", "/usr/local/bin", "/usr/bin", "/bin", "/usr/sbin", "/sbin"];
-  try {
-    const shell = process.env.SHELL || "/bin/zsh";
-    const out = execFileSync(shell, ["-ilc", 'printf "__BBPATH__%s__BBPATH__" "$PATH"'], { encoding: "utf8", timeout: 5000, stdio: ["ignore", "pipe", "ignore"] });
-    const m = out.match(/__BBPATH__(.*)__BBPATH__/);
-    loginPath = [m?.[1] ?? "", ...fallback].filter(Boolean).join(":");
-  } catch {
-    loginPath = [process.env.PATH ?? "", ...fallback].join(":");
-  }
-  return loginPath;
-}
-
 export function detectAgents(): { id: AgentId; label: string; path: string | null }[] {
-  const dirs = userPath().split(":");
-  return AGENTS.map((a) => {
-    const found = dirs.map((d) => path.join(d, a.bin)).find((p) => {
-      try {
-        fs.accessSync(p, fs.constants.X_OK);
-        return true;
-      } catch {
-        return false;
-      }
-    });
-    return { id: a.id, label: a.label, path: found ?? null };
-  });
+  return AGENTS.map((a) => ({
+    id: a.id,
+    label: a.label,
+    path: findBinary(a.bin),
+  }));
 }
 
 /**
@@ -58,7 +37,7 @@ export function detectAgents(): { id: AgentId; label: string; path: string | nul
  * and PATH has the bassblock CLI shim first.
  */
 function agentEnv(agent: AgentId): NodeJS.ProcessEnv {
-  const keep = ["HOME", "USER", "LOGNAME", "SHELL", "LANG", "LC_ALL", "TMPDIR", "TERM", "__CF_USER_TEXT_ENCODING"];
+  const keep = ["HOME", "USER", "LOGNAME", "SHELL", "LANG", "LC_ALL", "TMPDIR", "TEMP", "TMP", "TERM", "__CF_USER_TEXT_ENCODING"];
   const vendor: Record<AgentId, RegExp> = {
     claude: /^(ANTHROPIC_|CLAUDE_CODE_|CLAUDE_CONFIG_DIR$|AWS_|CLOUD_ML_REGION$|GOOGLE_APPLICATION_CREDENTIALS$|VERTEX_)/,
     gemini: /^(GEMINI_|GOOGLE_)/,
@@ -66,7 +45,7 @@ function agentEnv(agent: AgentId): NodeJS.ProcessEnv {
   };
   const env: NodeJS.ProcessEnv = {};
   for (const [k, v] of Object.entries(process.env)) if (keep.includes(k) || vendor[agent].test(k)) env[k] = v;
-  env.PATH = `${paths.binDir()}:${userPath()}`;
+  env.PATH = `${paths.binDir()}${path.delimiter}${userPath()}`;
   if (process.env.BASSBLOCK_HOME) env.BASSBLOCK_HOME = process.env.BASSBLOCK_HOME;
   env.NO_COLOR = "1";
   env.FORCE_COLOR = "0";
@@ -78,8 +57,10 @@ function skillText(): string {
 }
 
 function buildPrompt(kind: "create" | "edit" | "repair", blockId: string, request: string, problems?: Problem[]): string {
+  const runtimes = formatRuntimesForPrompt();
   const head = `You are working on a BASS BLOCK block (a sandboxed mini-app) in the current directory. Block id: ${blockId}.
 Reference example blocks (read-only) are in: ${TEMPLATES_DIR}
+${runtimes}
 Follow the "bass-block-builder" rules in your instructions exactly. Only edit files in the current directory.`;
   if (kind === "create")
     return `${head}
@@ -89,8 +70,9 @@ The user wants this tool:
 ${request}
 """
 
-The directory currently holds a minimal starter block. Replace it with a complete, polished implementation of the request.
-Update block.json: keep "id": "${blockId}", set a short "name", a one-line "description", an emoji "icon", and declare only the permissions you need.
+Choose the best execution mode and language for this tool ("mode": "web" for pure UI/Canvas/WebGL/TS tools, or "mode": "polyglot" with a local backend in Python, Swift, Rust, C++, Go or Node.js if backend compute, data analysis, native APIs or media processing fit best).
+Replace the starter files with a complete, polished implementation of the request.
+Update block.json: keep "id": "${blockId}", set a short "name", a one-line "description", an emoji "icon", configure "mode" (and "backend" if polyglot), and declare only the permissions you need.
 When you are done, run \`bassblock validate\` and fix every problem it reports until it passes. Finish with a one or two sentence summary of what you built.`;
   if (kind === "edit")
     return `${head}
@@ -101,6 +83,7 @@ ${request}
 """
 
 Read the existing code first and make the change without breaking existing features or the user's saved data format (bb.storage keys / bb.data files).
+You may switch the block to "mode": "polyglot" and add a backend in backend/ if the requested feature requires Python, Swift, Rust, C++, Go or Node.js.
 Bump the patch version in block.json. When done, run \`bassblock validate\` and fix every problem it reports. Finish with a one or two sentence summary.`;
   return `${head}
 
@@ -122,7 +105,7 @@ function agentArgs(agent: AgentId, prompt: string, codeDir: string): string[] {
         "-p", prompt,
         "--output-format", "stream-json", "--verbose",
         "--permission-mode", "acceptEdits",
-        "--allowedTools", "Read,Write,Edit,MultiEdit,Glob,Grep,LS,TodoWrite,Bash(bassblock validate:*),Bash(bassblock validate)",
+        "--allowedTools", "Read,Write,Edit,MultiEdit,Glob,Grep,LS,TodoWrite,Bash(bassblock validate:*),Bash(bassblock validate),Bash(bassblock runtimes)",
         "--disallowedTools", "WebFetch,WebSearch",
         "--add-dir", TEMPLATES_DIR,
         "--append-system-prompt", skillText(),
@@ -133,12 +116,30 @@ function agentArgs(agent: AgentId, prompt: string, codeDir: string): string[] {
         "--approval-mode", "auto_edit",
         "--allowed-tools", "run_shell_command(bassblock validate)",
         "--include-directories", TEMPLATES_DIR,
-        "--skip-trust",
         "-o", "stream-json",
       ];
     case "codex":
       return ["exec", "--sandbox", "workspace-write", "--skip-git-repo-check", "--json", "--cd", codeDir, `${skillText()}\n\n---\n\n${prompt}`];
   }
+}
+
+/** Hash all source files in `codeDir` (excluding `.git`) to detect whether an agent actually modified anything. */
+function dirContentHash(codeDir: string): string {
+  const h = crypto.createHash("sha256");
+  const walk = (dir: string) => {
+    if (!fs.existsSync(dir)) return;
+    for (const ent of fs.readdirSync(dir, { withFileTypes: true }).sort((a, b) => a.name.localeCompare(b.name))) {
+      if (ent.name === ".git" || ent.name === ".bin") continue;
+      const p = path.join(dir, ent.name);
+      if (ent.isDirectory()) walk(p);
+      else if (ent.isFile()) {
+        h.update(path.relative(codeDir, p) + ":");
+        h.update(fs.readFileSync(p));
+      }
+    }
+  };
+  walk(codeDir);
+  return h.digest("hex");
 }
 
 /** Turn one line of agent output into something readable for the progress panel. */
@@ -188,7 +189,7 @@ function describeTool(name: string, input: any): string {
 
 export interface AgentJob {
   cancel(): void;
-  done: Promise<{ ok: boolean; problems: Problem[] }>;
+  done: Promise<{ ok: boolean; problems: Problem[]; cancelled?: boolean }>;
 }
 
 export function runAgentJob(opts: {
@@ -207,6 +208,7 @@ export function runAgentJob(opts: {
   const log = fs.createWriteStream(transcript);
   let child: ChildProcess | null = null;
   let cancelled = false;
+  let lastStderr = "";
   const emit = (e: AgentEvent) => {
     log.write(JSON.stringify(e) + "\n");
     opts.onEvent(e);
@@ -214,11 +216,12 @@ export function runAgentJob(opts: {
 
   const runOnce = (prompt: string) =>
     new Promise<number>((resolve) => {
+      lastStderr = "";
       child = spawn(opts.agentPath, agentArgs(opts.agent, prompt, codeDir), {
         cwd: codeDir,
         env: agentEnv(opts.agent),
         stdio: ["ignore", "pipe", "pipe"],
-        detached: true, // own process group, so cancel kills the whole tree
+        detached: process.platform !== "win32",
       });
       let buf = "";
       child.stdout!.on("data", (d: Buffer) => {
@@ -233,7 +236,12 @@ export function runAgentJob(opts: {
       });
       child.stderr!.on("data", (d: Buffer) => {
         const t = d.toString().trim();
-        if (t) log.write(`[stderr] ${t}\n`);
+        if (!t) return;
+        log.write(`[stderr] ${t}\n`);
+        lastStderr = (lastStderr ? lastStderr + "\n" : "") + t;
+        for (const line of t.split("\n").slice(0, 6)) {
+          if (line.trim()) emit({ type: "log", text: line.trim().slice(0, 400) });
+        }
       });
       child.on("error", (err) => {
         emit({ type: "log", text: `Could not start ${opts.agent}: ${err.message}` });
@@ -250,13 +258,22 @@ export function runAgentJob(opts: {
     });
 
   const done = (async () => {
+    const initialHash = dirContentHash(codeDir);
     history.snapshot(opts.blockId, `Before AI: ${opts.request.slice(0, 200)}`);
+    const beforeRef = history.list(opts.blockId)[0]?.ref;
     const maxRepairs = opts.maxRepairs ?? 3;
     let result: { ok: boolean; problems: Problem[] } = { ok: false, problems: [] };
     try {
       emit({ type: "status", text: opts.kind === "create" ? "Building your block…" : "Applying your change…" });
       let code = await runOnce(buildPrompt(opts.kind, opts.blockId, opts.request));
       for (let attempt = 0; !cancelled; attempt++) {
+        const changed = dirContentHash(codeDir) !== initialHash;
+        if (code !== 0 && !changed) {
+          const errMsg = lastStderr.split("\n").filter(Boolean).slice(-3).join(" — ") || `Agent CLI exited with code ${code} before making any changes.`;
+          result = { ok: false, problems: [{ step: "runtime", message: errMsg }] };
+          emit({ type: "log", text: `Agent failed: ${errMsg}` });
+          break;
+        }
         if (code !== 0) emit({ type: "log", text: `Agent exited with code ${code}` });
         emit({ type: "status", text: "Validating…" });
         result = await opts.validate();
@@ -265,11 +282,20 @@ export function runAgentJob(opts: {
         code = await runOnce(buildPrompt("repair", opts.blockId, opts.request, result.problems));
       }
     } finally {
-      history.snapshot(opts.blockId, `AI: ${opts.request.slice(0, 200)}`);
+      const changed = dirContentHash(codeDir) !== initialHash;
+      if (cancelled) {
+        if (opts.kind === "edit" && beforeRef) {
+          try {
+            history.restore(opts.blockId, beforeRef);
+          } catch {}
+        }
+      } else if (changed) {
+        history.snapshot(opts.blockId, `AI: ${opts.request.slice(0, 200)}`);
+      }
       emit({ type: "done", ok: result.ok && !cancelled, problems: result.problems, cancelled });
       log.end();
     }
-    return result;
+    return { ...result, cancelled };
   })();
 
   return {
@@ -278,11 +304,15 @@ export function runAgentJob(opts: {
       const c = child as ChildProcess | null;
       if (c?.pid) {
         try {
-          process.kill(-c.pid, "SIGTERM");
+          if (process.platform === "win32") c.kill();
+          else process.kill(-c.pid, "SIGTERM");
         } catch {}
         setTimeout(() => {
           try {
-            if (c.pid) process.kill(-c.pid, "SIGKILL");
+            if (c.pid) {
+              if (process.platform === "win32") c.kill("SIGKILL");
+              else process.kill(-c.pid, "SIGKILL");
+            }
           } catch {}
         }, 3000);
       }

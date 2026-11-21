@@ -1,4 +1,4 @@
-// Host UI: sidebar, block library grid, open-block tabs, create/modify dialogs, AI settings.
+// Host UI: sidebar, block library grid, open-block tabs, split view, create/modify dialogs, version history, AI & runtime settings.
 
 interface BlockItem {
   id: string;
@@ -8,12 +8,16 @@ interface BlockItem {
   description: string;
   icon: string;
   version: string;
+  mode?: "web" | "polyglot";
+  language?: string | null;
   permissions: string[];
   open: boolean;
   building: boolean;
   thumb: string | null;
 }
 interface AgentInfo { id: string; label: string; path: string | null }
+interface RuntimeInfo { id: string; label: string; bin: string; path: string | null; version: string | null }
+interface HistoryEntry { ref: string; message: string; at: number }
 type AgentEvent =
   | { type: "status" | "text" | "tool" | "log"; text: string }
   | { type: "done"; ok: boolean; problems: { step: string; message: string; file?: string }[]; cancelled?: boolean };
@@ -25,8 +29,10 @@ const state = {
   blocks: [] as BlockItem[],
   open: [] as string[], // open block ids, in tab order
   view: "home" as "home" | string, // "home" or a block id
+  splitView: null as string | null, // optional second block id shown side-by-side
   search: "",
   agents: [] as AgentInfo[],
+  runtimes: [] as RuntimeInfo[],
   agent: "claude",
   logsOpen: false,
   modalOpen: false,
@@ -54,6 +60,7 @@ const $ = <T extends HTMLElement = HTMLElement>(sel: string) => document.querySe
 const svg = (path: string) => {
   const s = document.createElementNS("http://www.w3.org/2000/svg", "svg");
   s.setAttribute("viewBox", "0 0 20 20");
+  s.setAttribute("aria-hidden", "true");
   s.innerHTML = path;
   return s;
 };
@@ -61,11 +68,34 @@ const ICONS = {
   plus: '<path d="M10 4v12M4 10h12"/>',
   sparkle: '<path d="M10 2.5l1.6 4.4 4.4 1.6-4.4 1.6L10 14.5l-1.6-4.4L4 8.5l4.4-1.6zM15.5 13l.7 1.8 1.8.7-1.8.7-.7 1.8-.7-1.8-1.8-.7 1.8-.7z"/>',
   undo: '<path d="M7 5L3.5 8.5 7 12"/><path d="M4 8.5h7.5a4.5 4.5 0 010 9H9"/>',
+  history: '<circle cx="10" cy="10" r="7"/><path d="M10 6v4.2l2.8 1.8"/>',
+  split: '<rect x="2.5" y="4" width="15" height="12" rx="2"/><path d="M10 4v12"/>',
   reload: '<path d="M16 10a6 6 0 11-1.8-4.3"/><path d="M16 3.5v3.7h-3.7"/>',
   logs: '<path d="M4 5h12M4 10h12M4 15h8"/>',
   more: '<circle cx="5" cy="10" r="1.2"/><circle cx="10" cy="10" r="1.2"/><circle cx="15" cy="10" r="1.2"/>',
   close: '<path d="M5.5 5.5l9 9M14.5 5.5l-9 9"/>',
+  search: '<circle cx="9" cy="9" r="5.5"/><path d="M13 13l3.5 3.5"/>',
+  check: '<path d="M4.5 10.5l3.5 3.5 7.5-8"/>',
+  stop: '<rect x="5.5" y="5.5" width="9" height="9" rx="1.5"/>',
+  chevron: '<path d="M8 5.5l4.5 4.5L8 14.5"/>',
+  dot: '<circle cx="10" cy="10" r="2"/>',
+  file: '<path d="M11.5 2.5H6a1.5 1.5 0 00-1.5 1.5v12A1.5 1.5 0 006 17.5h8a1.5 1.5 0 001.5-1.5V6.5z"/><path d="M11.5 2.5v4h4"/>',
+  globe: '<circle cx="10" cy="10" r="7"/><path d="M3 10h14M10 3c2 2.2 2.8 4.5 2.8 7s-.8 4.8-2.8 7c-2-2.2-2.8-4.5-2.8-7S8 5.2 10 3z"/>',
+  clipboard: '<rect x="5" y="4" width="10" height="13.5" rx="1.5"/><path d="M7.5 4V3h5v1"/>',
+  text: '<path d="M4 5h12M4 9h12M4 13h8"/>',
+  image: '<rect x="3" y="4" width="14" height="12" rx="2"/><circle cx="7.5" cy="8.5" r="1.3"/><path d="M17 13l-4-4-7 7"/>',
+  cube: '<path d="M10 2.5l6.5 3.7v7.6L10 17.5l-6.5-3.7V6.2z"/><path d="M3.5 6.2L10 10l6.5-3.8M10 10v7.5"/>',
+  square: '<rect x="4" y="4" width="12" height="12" rx="3"/>',
+  terminal: '<path d="M4.5 6l3.5 4-3.5 4M10 14.5h5.5"/>',
+  bolt: '<path d="M11 2.5L4.5 11H10l-1 6.5L15.5 9H10z"/>',
 };
+const bicon = (emoji: string, lg = false) => h("span", { class: `bicon ${lg ? "lg" : ""}`, "aria-hidden": "true" }, emoji);
+const PERM_CHIPS: [RegExp, string, string][] = [
+  [/^Run local/, "Polyglot", ICONS.terminal],
+  [/^Read and write files/, "Files", ICONS.file],
+  [/^Connect/, "Network", ICONS.globe],
+  [/clipboard/, "Clipboard", ICONS.clipboard],
+];
 
 function toast(msg: string, kind: "info" | "err" = "info") {
   const t = h("div", { class: `toast ${kind === "err" ? "err" : ""}`, title: msg }, msg);
@@ -89,44 +119,89 @@ const agentLabel = (id: string) => state.agents.find((a) => a.id === id)?.label 
 async function refreshBlocks() {
   state.blocks = await host.listBlocks();
   state.open = state.open.filter((id) => state.blocks.some((b) => b.id === id && b.open));
-  if (state.view !== "home" && !state.open.includes(state.view)) state.view = "home";
+  if (state.splitView && (!state.open.includes(state.splitView) || state.splitView === state.view)) {
+    state.splitView = null;
+  }
+  if (state.view !== "home" && !state.open.includes(state.view)) {
+    state.view = state.splitView ?? "home";
+    state.splitView = null;
+  }
   render();
 }
 
 // ---------------------------------------------------------------- navigation
-async function openBlock(id: string) {
-  const res = await attempt(() => host.openBlock(id));
+async function openBlock(id: string, asSplit = false) {
+  const res = await attempt(() => host.openBlock(id, asSplit));
   if (!res) return;
   if (!state.open.includes(id)) state.open.push(id);
-  state.view = id;
+  if (asSplit && state.view !== "home" && state.view !== id) {
+    state.splitView = id;
+  } else {
+    state.view = id;
+    if (state.splitView === id) state.splitView = null;
+  }
   render();
   syncViewport();
 }
 function goHome() {
   state.view = "home";
-  host.showBlock(null);
+  host.showBlock(null, null);
   render();
 }
 async function closeBlock(id: string) {
   await host.closeBlock(id);
   const idx = state.open.indexOf(id);
   state.open = state.open.filter((x) => x !== id);
+  if (state.splitView === id) {
+    state.splitView = null;
+  }
   if (state.view === id) {
-    const next = state.open[Math.min(idx, state.open.length - 1)];
-    if (next) {
-      state.view = next;
-      host.showBlock(next);
-    } else state.view = "home";
+    if (state.splitView) {
+      state.view = state.splitView;
+      state.splitView = null;
+    } else {
+      const next = state.open[Math.min(idx, state.open.length - 1)];
+      state.view = next ?? "home";
+    }
   }
   render();
 }
 
-/** Keep the native block view glued to #block-viewport. */
+async function toggleSplitMenu() {
+  if (state.view === "home") return;
+  if (state.splitView) {
+    state.splitView = null;
+    render();
+    syncViewport();
+    return;
+  }
+  const candidates = state.blocks.filter((b) => b.id !== state.view && !b.building);
+  if (!candidates.length) {
+    toast("Create at least two blocks to use Split View.");
+    return;
+  }
+  const choice = await host.popupMenu([
+    ...candidates.map((b) => ({ id: b.id, label: `${b.icon}  ${b.name}` })),
+  ]);
+  if (choice) await openBlock(choice, true);
+}
+
+/** Keep the native block view(s) glued to #block-viewport. */
 function syncViewport() {
   const el = $("#block-viewport");
   const r = el.getBoundingClientRect();
-  host.setViewBounds({ x: r.left, y: r.top, width: r.width, height: r.height });
-  host.showBlock(state.view !== "home" && !state.modalOpen ? state.view : null);
+  const hasSplit = Boolean(state.view !== "home" && state.splitView && state.splitView !== state.view);
+  el.classList.toggle("split", hasSplit);
+  if (hasSplit) {
+    const half = Math.floor(r.width / 2);
+    const primary = { x: r.left, y: r.top, width: half, height: r.height };
+    const secondary = { x: r.left + half + 1, y: r.top, width: Math.max(0, r.width - half - 1), height: r.height };
+    host.setViewBounds(primary, secondary);
+    host.showBlock(!state.modalOpen ? state.view : null, !state.modalOpen ? state.splitView : null);
+  } else {
+    host.setViewBounds({ x: r.left, y: r.top, width: r.width, height: r.height }, null);
+    host.showBlock(state.view !== "home" && !state.modalOpen ? state.view : null, null);
+  }
 }
 new ResizeObserver(syncViewport).observe(document.body);
 
@@ -148,12 +223,13 @@ function renderSidebar() {
   openList.replaceChildren(
     ...state.open.map((id) => {
       const b = blockById(id);
+      const isCurrent = state.view === id || state.splitView === id;
       return h(
         "li",
-        { class: `side-row ${state.view === id ? "active" : ""}`, onclick: () => openBlock(id) },
-        h("span", { class: "ico" }, b?.icon ?? "▦"),
+        { class: `side-row ${isCurrent ? "active" : ""}`, onclick: () => openBlock(id) },
+        bicon(b?.icon ?? "▦"),
         h("span", { class: "label" }, b?.name ?? id),
-        h("button", { class: "x", title: "Close", onclick: (e: Event) => (e.stopPropagation(), closeBlock(id)) }, svg(ICONS.close)),
+        h("button", { class: "x", title: "Close", "aria-label": `Close ${b?.name ?? id}`, onclick: (e: Event) => (e.stopPropagation(), closeBlock(id)) }, svg(ICONS.close)),
       );
     }),
   );
@@ -163,19 +239,22 @@ function renderSidebar() {
       h(
         "li",
         { class: "side-row", onclick: () => (b.building ? showProgress(b.id) : openBlock(b.id)), oncontextmenu: (e: Event) => (e.preventDefault(), blockMenu(b.id)) },
-        h("span", { class: "ico" }, b.icon),
+        bicon(b.icon),
         h("span", { class: "label" }, b.name),
         b.building ? h("span", { class: "spinner", title: "AI is working on this block" }) : !b.ok ? h("span", { class: "dot err", title: b.error }) : null,
       ),
     ),
   );
-  $("#agent-pill").textContent = agentLabel(state.agent);
+  const pill = $("#agent-pill");
+  const agentOk = state.agents.some((a) => a.id === state.agent && a.path);
+  pill.textContent = agentOk ? agentLabel(state.agent) : "No agent";
+  pill.classList.toggle("off", !agentOk);
 }
 
 function topBtn(label: string, icon: string, onclick: () => void, opts: { primary?: boolean; title?: string; iconOnly?: boolean; disabled?: boolean } = {}) {
   return h(
     "button",
-    { class: `btn ${opts.primary ? "primary" : "ghost"} ${opts.iconOnly ? "icon-btn" : ""}`, title: opts.title ?? label, onclick, disabled: opts.disabled },
+    { class: `btn ${opts.primary ? "primary" : "ghost"} ${opts.iconOnly ? "icon-btn" : ""}`, title: opts.title ?? label, "aria-label": label, onclick, disabled: opts.disabled },
     svg(icon),
     opts.iconOnly ? null : label,
   );
@@ -184,9 +263,10 @@ function topBtn(label: string, icon: string, onclick: () => void, opts: { primar
 function renderTopbar() {
   const bar = $("#topbar");
   if (state.view === "home") {
-    const search = h("input", {
+    const input = h("input", {
       class: "search",
       type: "search",
+      "aria-label": "Search blocks",
       placeholder: "Search blocks",
       value: state.search,
       oninput: (e: Event) => {
@@ -194,21 +274,43 @@ function renderTopbar() {
         renderHome();
       },
     });
-    bar.replaceChildren(...nodes(h("h1", {}, "Blocks"), h("span", { class: "spacer" }), state.blocks.length ? search : null, topBtn("New block", ICONS.plus, () => showCreate(), { primary: true })));
+    const search = h("label", { class: "search-wrap" }, svg(ICONS.search), input);
+    const newBtn = topBtn("New block", ICONS.plus, () => showCreate(), { primary: true });
+    newBtn.append(h("span", { class: "kbd" }, "⌘N"));
+    bar.replaceChildren(
+      ...nodes(
+        h("h1", {}, "Blocks", state.blocks.length ? h("span", { class: "count num" }, ` ${state.blocks.length}`) : null),
+        h("span", { class: "spacer" }),
+        state.blocks.length ? search : null,
+        newBtn,
+      ),
+    );
     return;
   }
   const id = state.view;
   const b = blockById(id);
+  const splitB = state.splitView ? blockById(state.splitView) : null;
   const m = state.metrics[id];
   const busy = state.jobs.has(id) && !state.jobs.get(id)!.done;
   bar.replaceChildren(...nodes(
-    h("div", { class: "crumb" }, h("span", { class: "ico" }, b?.icon ?? "▦"), h("span", { class: "name" }, b?.name ?? id), h("span", { class: "ver" }, b?.version ? `v${b.version}` : "")),
+    h(
+      "div",
+      { class: "crumb" },
+      bicon(b?.icon ?? "▦", true),
+      h("span", { class: "name" }, b?.name ?? id),
+      b?.language ? h("span", { class: "chip" }, b.language) : null,
+      h("span", { class: "ver" }, b?.version ? `v${b.version}` : ""),
+      splitB ? h("span", { class: "ver" }, ` · Split: ${splitB.icon} ${splitB.name}`) : null,
+    ),
     m ? h("span", { class: "meter", title: "Memory used by this block's process" }, `${m.memoryMb} MB`) : null,
     h("span", { class: "spacer" }),
     busy
       ? h("button", { class: "btn ghost", onclick: () => showProgress(id) }, h("span", { class: "spinner" }), "AI working…")
       : topBtn("Modify with AI", ICONS.sparkle, () => showEdit(id)),
+    h("span", { class: "divider", "aria-hidden": "true" }),
+    topBtn(state.splitView ? "Exit Split View" : "Split View", ICONS.split, toggleSplitMenu, { iconOnly: true, title: state.splitView ? "Close Split View (⌘\\)" : "Split View Side-by-Side (⌘\\)" }),
     topBtn("Undo AI change", ICONS.undo, () => undoAi(id), { iconOnly: true, disabled: busy }),
+    topBtn("Version History", ICONS.history, () => showHistory(id), { iconOnly: true, disabled: busy }),
     topBtn("Reload", ICONS.reload, () => host.reloadBlock(id), { iconOnly: true }),
     topBtn("Console", ICONS.logs, toggleLogs, { iconOnly: true }),
     topBtn("More", ICONS.more, () => blockMenu(id), { iconOnly: true }),
@@ -217,9 +319,9 @@ function renderTopbar() {
 
 const EXAMPLES = [
   "A markdown editor with live word-frequency stats",
+  "A Python CSV & dataset statistics analyzer",
+  "A native Swift SHA-256 and benchmark utility",
   "A sprite-sheet slicer for game dev",
-  "A pomodoro timer with a daily log",
-  "A JSON formatter and diff tool",
   "A color palette generator from an image",
   "A 3D STL model viewer",
 ];
@@ -231,31 +333,32 @@ function renderHome() {
       h(
         "div",
         { class: "empty" },
-        h("button", { class: "big-plus", title: "New block", onclick: () => showCreate() }, svg(ICONS.plus)),
+        h("button", { class: "big-plus", title: "New block", "aria-label": "New block", onclick: () => showCreate() }, svg(ICONS.plus)),
         h("h2", {}, "Build your first block"),
-        h("p", {}, "Describe a tool in plain words. Your AI agent writes it, BASS BLOCK checks it runs, and it opens right here."),
-        h("div", { class: "examples" }, ...EXAMPLES.map((ex) => h("button", { class: "example", onclick: () => showCreate(ex) }, ex))),
+        h("p", {}, "Describe a tool in plain words. Your AI agent picks the best language (Web, Python, Swift, Rust, C++, Go), BASS BLOCK validates it, and it opens right here."),
+        h("div", { class: "examples" }, ...EXAMPLES.map((ex) => h("button", { class: "example", onclick: () => showCreate(ex) }, svg(ICONS.sparkle), ex))),
       ),
     );
     return;
   }
   const q = state.search.trim().toLowerCase();
-  const list = state.blocks.filter((b) => !q || `${b.name} ${b.description} ${b.id}`.toLowerCase().includes(q));
+  const list = state.blocks.filter((b) => !q || `${b.name} ${b.description} ${b.id} ${b.language ?? ""}`.toLowerCase().includes(q));
   root.replaceChildren(
     h(
       "div",
       { class: "grid" },
       !q ? h("button", { class: "tile new", onclick: () => showCreate() }, h("span", { class: "plus" }, svg(ICONS.plus)), h("strong", {}, "New block"), h("span", { class: "hint" }, "Describe it, AI builds it")) : null,
-      ...list.map(tile),
+      ...list.map((b, i) => tile(b, i + 1)),
     ),
   );
 }
 
-function tile(b: BlockItem) {
+function tile(b: BlockItem, i = 0) {
   return h(
     "button",
     {
       class: "tile",
+      style: `--i:${Math.min(i, 12)}`,
       onclick: () => (b.building ? showProgress(b.id) : openBlock(b.id)),
       oncontextmenu: (e: Event) => (e.preventDefault(), blockMenu(b.id)),
       title: b.description || b.name,
@@ -264,28 +367,35 @@ function tile(b: BlockItem) {
     h(
       "div",
       { class: "tile-body" },
-      h("div", { class: "tile-title" }, h("span", {}, b.icon), h("span", { class: "t" }, b.name), b.open ? h("span", { class: "dot", title: "Open" }) : null),
+      h("div", { class: "tile-title" }, bicon(b.icon), h("span", { class: "t" }, b.name), b.open ? h("span", { class: "dot", title: "Open", "aria-label": "Open" }) : null),
       h("div", { class: "tile-desc" }, b.description || " "),
       h(
         "div",
         { class: "chips" },
-        b.building ? h("span", { class: "chip busy" }, "AI building…") : null,
+        b.building ? h("span", { class: "chip busy" }, h("span", { class: "spinner", style: "width:9px;height:9px;border-width:1.5px" }), "AI building") : null,
         !b.ok ? h("span", { class: "chip err", title: b.error }, "Needs repair") : null,
-        b.version ? h("span", { class: "chip" }, `v${b.version}`) : null,
-        ...b.permissions.map((p) => h("span", { class: "chip", title: p }, p.startsWith("Read and write files") ? "Files" : p.startsWith("Connect") ? "Network" : p.includes("clipboard") ? "Clipboard" : p)),
+        b.language ? h("span", { class: "chip ok" }, b.language) : null,
+        b.version ? h("span", { class: "chip num" }, `v${b.version}`) : null,
+        ...b.permissions.map((p) => {
+          const m = PERM_CHIPS.find(([re]) => re.test(p));
+          return h("span", { class: "chip", title: p }, m ? svg(m[2]) : null, m ? m[1] : p);
+        }),
       ),
     ),
-    h("span", { class: "btn small tile-menu icon-btn", onclick: (e: Event) => (e.stopPropagation(), blockMenu(b.id)) }, svg(ICONS.more)),
+    h("span", { class: "btn small tile-menu icon-btn", role: "button", "aria-label": `More actions for ${b.name}`, onclick: (e: Event) => (e.stopPropagation(), blockMenu(b.id)) }, svg(ICONS.more)),
   );
 }
 
 async function blockMenu(id: string) {
   const b = blockById(id);
   const isOpen = state.open.includes(id);
+  const canSplit = state.view !== "home" && state.view !== id;
   const choice = await host.popupMenu([
     { id: "open", label: "Open" },
+    ...(canSplit ? [{ id: "split", label: "Open Side-by-Side (Split View)" }] : []),
     { id: "edit", label: "Modify with AI…" },
     { id: "undo", label: "Undo last AI change" },
+    { id: "history", label: "Version History…" },
     { separator: true },
     { id: "validate", label: "Run validation" },
     { id: "devtools", label: "Toggle Developer Tools", enabled: isOpen },
@@ -296,8 +406,10 @@ async function blockMenu(id: string) {
   ]);
   switch (choice) {
     case "open": return openBlock(id);
+    case "split": return openBlock(id, true);
     case "edit": return showEdit(id);
     case "undo": return undoAi(id);
+    case "history": return showHistory(id);
     case "validate": {
       toast(`Validating ${b?.name ?? id}…`);
       const r = await attempt(() => host.validate(id));
@@ -311,7 +423,8 @@ async function blockMenu(id: string) {
       const gone = await attempt(() => host.deleteBlock(id));
       if (gone) {
         state.open = state.open.filter((x) => x !== id);
-        if (state.view === id) state.view = "home";
+        if (state.splitView === id) state.splitView = null;
+        if (state.view === id) state.view = state.splitView ?? "home";
         await refreshBlocks();
       }
     }
@@ -323,6 +436,50 @@ async function undoAi(id: string) {
   if (undone === undefined) return;
   toast(undone ? `Undid: ${String(undone).replace(/^AI: /, "")}` : "No AI change to undo");
   refreshBlocks();
+}
+
+async function showHistory(id: string) {
+  const b = blockById(id);
+  const entries = (await attempt(() => host.history(id))) as HistoryEntry[] | undefined;
+  if (!entries) return;
+  const list = h("ul", { class: "history-list" });
+  const m = modal({
+    title: h("span", {}, "Version History — ", h("strong", {}, b?.name ?? id)),
+    body: [
+      h("p", { class: "hint", style: "margin:0" }, "Every AI change and template creation is snapshotted automatically. Restoring a version never alters your saved block data."),
+      entries.length
+        ? list
+        : h("p", { class: "hint" }, "No snapshots recorded yet."),
+    ],
+    foot: [h("span", { class: "spacer" }), h("button", { class: "btn", onclick: () => m.close() }, "Close")],
+  });
+  list.replaceChildren(
+    ...entries.map((entry, idx) =>
+      h(
+        "li",
+        { class: "history-row" },
+        h("span", { class: "h-meta" }, new Date(entry.at).toLocaleString([], { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit", hour12: false })),
+        h("span", { class: "h-msg", title: entry.message }, entry.message),
+        idx === 0
+          ? h("span", { class: "chip ok" }, "Current")
+          : h(
+              "button",
+              {
+                class: "btn small",
+                onclick: async () => {
+                  const res = await attempt(() => host.restoreHistory(id, entry.ref));
+                  if (res) {
+                    toast(`Restored: ${entry.message.slice(0, 50)}`);
+                    m.close();
+                    await refreshBlocks();
+                  }
+                },
+              },
+              "Restore",
+            ),
+      ),
+    ),
+  );
 }
 
 // ---------------------------------------------------------------- logs
@@ -350,10 +507,23 @@ $("#log-clear").addEventListener("click", () => {
 });
 
 // ---------------------------------------------------------------- modals
+let activeModalEsc: ((e: KeyboardEvent) => void) | null = null;
+
 function modal(opts: { title: Child; body: Node[]; foot: Node[]; onClose?: () => void; head?: Node[] }) {
   closeModal();
   state.modalOpen = true;
-  host.showBlock(null);
+
+  // Capture or show the active block's preview behind the blurred modal backdrop instead of a blank screen
+  if (state.view !== "home") {
+    const vp = $("#block-viewport");
+    const fallbackThumb = blockById(state.view)?.thumb;
+    if (fallbackThumb) vp.style.backgroundImage = `url("${fallbackThumb}")`;
+    host.capturePreview().then((dataUrl: string | null) => {
+      if (state.modalOpen && dataUrl) vp.style.backgroundImage = `url("${dataUrl}")`;
+    }).catch(() => {});
+  }
+  host.showBlock(null, null);
+
   const close = () => {
     closeModal();
     opts.onClose?.();
@@ -370,13 +540,21 @@ function modal(opts: { title: Child; body: Node[]; foot: Node[]; onClose?: () =>
     ),
   );
   $("#modal-root").replaceChildren(el);
-  const onKey = (e: KeyboardEvent) => e.key === "Escape" && close();
-  document.addEventListener("keydown", onKey, { once: true });
+  activeModalEsc = (e: KeyboardEvent) => {
+    if (e.key === "Escape") close();
+  };
+  document.addEventListener("keydown", activeModalEsc);
   return { el, close };
 }
+
 function closeModal() {
+  if (activeModalEsc) {
+    document.removeEventListener("keydown", activeModalEsc);
+    activeModalEsc = null;
+  }
   if (!state.modalOpen) return;
   state.modalOpen = false;
+  $("#block-viewport").style.backgroundImage = "";
   $("#modal-root").replaceChildren();
   syncViewport();
 }
@@ -390,24 +568,43 @@ function agentSelect() {
   return sel;
 }
 
+const TEMPLATE_ICONS: Record<string, string> = {
+  "blank": ICONS.square,
+  "text-tool": ICONS.text,
+  "image-tool": ICONS.image,
+  "three-viewer": ICONS.cube,
+  "python-tool": ICONS.terminal,
+  "swift-tool": ICONS.bolt,
+};
 const TEMPLATE_INFO: Record<string, [string, string]> = {
-  "blank": ["Blank", "Minimal page with the bb SDK wired up"],
-  "text-tool": ["Text tool", "Editor with live stats, saves with bb.storage"],
-  "image-tool": ["Image tool", "Open, edit on a canvas, export PNG"],
-  "three-viewer": ["3D viewer", "three.js scene with an STL loader"],
+  "blank": ["Blank (Web)", "Minimal page with the bb SDK wired up"],
+  "text-tool": ["Text tool (Web)", "Editor with live stats, saves with bb.storage & bb.fs"],
+  "image-tool": ["Image tool (Web)", "Open, edit on a canvas, export PNG"],
+  "three-viewer": ["3D viewer (WebGL)", "three.js scene with an STL loader"],
+  "python-tool": ["Python Data Lab (Polyglot)", "Python 3 stdio JSON-RPC backend + analysis UI"],
+  "swift-tool": ["Swift Native Engine (Polyglot)", "Compiled native Swift backend + benchmark UI"],
 };
 
 function showCreate(prefill = "") {
   let tab: "ai" | "template" = "ai";
   let template = "text-tool";
-  const prompt = h("textarea", { class: "prompt", placeholder: "Describe the tool you want. For example: “A markdown editor with live word-frequency stats and a dark theme.”", value: prefill });
+  const prompt = h("textarea", {
+    class: "prompt",
+    placeholder: "Describe the tool you want. The AI can build it with Web/Canvas/Three.js, or with a local backend in Python, Swift, Rust, C++, Go or Node.js.",
+    value: prefill,
+  });
   const sel = agentSelect();
   const nameInput = h("input", { class: "input", placeholder: "Block name", value: "" });
   const tplGrid = h("div", { class: "tpl-grid" });
   const drawTpls = () =>
     tplGrid.replaceChildren(
       ...Object.entries(TEMPLATE_INFO).map(([k, [t, d]]) =>
-        h("button", { class: `tpl ${template === k ? "on" : ""}`, onclick: () => ((template = k), drawTpls()) }, h("strong", {}, t), h("span", {}, d)),
+        h(
+          "button",
+          { class: `tpl ${template === k ? "on" : ""}`, "aria-pressed": String(template === k), onclick: () => ((template = k), drawTpls()) },
+          h("span", { class: "tpl-ico" }, svg(TEMPLATE_ICONS[k] ?? ICONS.square)),
+          h("span", {}, h("strong", {}, t), h("span", {}, d)),
+        ),
       ),
     );
   drawTpls();
@@ -416,13 +613,15 @@ function showCreate(prefill = "") {
     "div",
     { class: "field" },
     prompt,
-    h("div", { class: "examples", style: "justify-content:flex-start" }, ...EXAMPLES.slice(0, 4).map((ex) => h("button", { class: "example", onclick: () => ((prompt.value = ex), prompt.focus()) }, ex))),
+    h("div", { class: "examples", style: "justify-content:flex-start" }, ...EXAMPLES.slice(0, 4).map((ex) => h("button", { class: "example", onclick: () => ((prompt.value = ex), prompt.focus()) }, svg(ICONS.sparkle), ex))),
     noAgent ? h("p", { class: "hint" }, "No coding agent found. Install Claude Code, Gemini CLI or Codex, or start from a template instead.") : null,
   );
   const tplPane = h("div", { class: "field", hidden: true }, h("div", { class: "field" }, h("label", {}, "Name"), nameInput), h("label", { class: "label" }, "Template"), tplGrid);
   const tabs = h("div", { class: "tabs" });
   const go = h("button", { class: "btn primary", onclick: () => submit() }, svg(ICONS.sparkle), "Build block");
+  const shortcut = h("span", { class: "kbd" }, "⌘↩ to build");
   const drawTabs = () => {
+    shortcut.textContent = tab === "ai" ? "⌘↩ to build" : "⌘↩ to create";
     tabs.replaceChildren(
       h("button", { class: tab === "ai" ? "on" : "", onclick: () => ((tab = "ai"), drawTabs()) }, "Describe it"),
       h("button", { class: tab === "template" ? "on" : "", onclick: () => ((tab = "template"), drawTabs()) }, "From template"),
@@ -438,9 +637,10 @@ function showCreate(prefill = "") {
     title: "New block",
     head: [tabs],
     body: [aiPane, tplPane],
-    foot: [h("span", { class: "kbd" }, "⌘↩ to build"), h("span", { class: "spacer" }), sel, go],
+    foot: [shortcut, h("span", { class: "spacer" }), sel, go],
   });
   prompt.addEventListener("keydown", (e) => e.key === "Enter" && e.metaKey && submit());
+  nameInput.addEventListener("keydown", (e) => e.key === "Enter" && (e.metaKey || tab === "template") && submit());
   setTimeout(() => prompt.focus(), 30);
 
   async function submit() {
@@ -466,12 +666,15 @@ function showCreate(prefill = "") {
 
 function showEdit(id: string) {
   const b = blockById(id);
-  const prompt = h("textarea", { class: "prompt", placeholder: `What should change in “${b?.name ?? id}”? For example: “Add a dark mode toggle and remember the choice.”` });
+  const prompt = h("textarea", {
+    class: "prompt",
+    placeholder: `What should change in “${b?.name ?? id}”? For example: “Add a Python backend for CSV statistics” or “Add a dark mode toggle.”`,
+  });
   const sel = agentSelect();
   const go = h("button", { class: "btn primary", onclick: () => submit() }, svg(ICONS.sparkle), "Apply change");
   modal({
     title: h("span", {}, "Modify ", h("strong", {}, b?.name ?? id)),
-    body: [prompt, h("p", { class: "hint" }, "The AI only edits this block's code. Your saved data is never touched, and you can undo the change afterwards.")],
+    body: [prompt, h("p", { class: "hint" }, "The AI only edits this block's code. Your saved data is never touched, and you can undo or restore any snapshot in Version History.")],
     foot: [h("span", { class: "kbd" }, "⌘↩ to apply"), h("span", { class: "spacer" }), sel, go],
   });
   prompt.addEventListener("keydown", (e) => e.key === "Enter" && e.metaKey && submit());
@@ -508,10 +711,10 @@ function showProgress(blockId: string) {
     status.replaceChildren(
       ...(done
         ? done.ok
-          ? [h("span", { class: "okmark" }, "✓"), job.kind === "create" ? "Your block is ready" : "Change applied"]
+          ? [h("span", { class: "mark ok" }, svg(ICONS.check)), job.kind === "create" ? "Your block is ready" : "Change applied"]
           : done.cancelled
-            ? [h("span", { class: "errmark" }, "■"), "Cancelled"]
-            : [h("span", { class: "errmark" }, "✗"), "The block still has problems"]
+            ? [h("span", { class: "mark err" }, svg(ICONS.stop)), "Cancelled"]
+            : [h("span", { class: "mark err" }, svg(ICONS.close)), "The block still has problems"]
         : [h("span", { class: "spinner" }), last?.text ?? "Starting agent…"]),
     );
     steps.replaceChildren(
@@ -519,7 +722,7 @@ function showProgress(blockId: string) {
         .filter((e) => e.type !== "done")
         .map((e) => {
           const ev = e as { type: string; text: string };
-          return h("li", { class: ev.type }, h("span", { class: "k" }, ev.type === "tool" ? "›" : ev.type === "status" ? "•" : ev.type === "log" ? "·" : ""), h("span", {}, ev.text));
+          return h("li", { class: ev.type }, h("span", { class: "k" }, ev.type === "tool" ? svg(ICONS.terminal) : ev.type === "status" ? svg(ICONS.chevron) : ev.type === "log" ? svg(ICONS.dot) : ""), h("span", {}, ev.text));
         }),
     );
     steps.scrollTop = steps.scrollHeight;
@@ -534,6 +737,8 @@ function showProgress(blockId: string) {
       );
     } else if (done.ok) {
       foot.append(h("span", { class: "spacer" }), h("button", { class: "btn", onclick: () => m.close() }, "Done"), h("button", { class: "btn primary", onclick: () => (m.close(), openBlock(blockId)) }, "Open block"));
+    } else if (done.cancelled && job.kind === "create") {
+      foot.append(h("span", { class: "spacer" }), h("button", { class: "btn primary", onclick: () => m.close() }, "Close"));
     } else {
       if (done.problems.length) extra.append(h("ol", { class: "problems" }, ...done.problems.slice(0, 8).map((p) => h("li", {}, `${p.file ? p.file + ": " : ""}${p.message}`))));
       const more = h("textarea", { class: "prompt", style: "min-height:72px", placeholder: "Add more detail for the next try (optional)" });
@@ -574,16 +779,20 @@ function showProgress(blockId: string) {
 }
 
 async function showSettings() {
-  state.agents = await host.detectAgents();
-  const info = await host.info();
-  const list = h("div", { class: "field" });
+  const [agents, runtimes, info] = await Promise.all([host.detectAgents(), host.detectRuntimes(), host.info()]);
+  state.agents = agents;
+  state.runtimes = runtimes;
+  const list = h("div", { class: "field", role: "radiogroup", "aria-label": "Coding agent" });
   const draw = () =>
     list.replaceChildren(
       ...state.agents.map((a) =>
         h(
-          "div",
+          "button",
           {
-            class: `agent-opt ${state.agent === a.id ? "on" : ""} ${a.path ? "" : "off"}`,
+            class: `agent-opt ${state.agent === a.id ? "on" : ""}`,
+            role: "radio",
+            "aria-checked": String(state.agent === a.id),
+            disabled: !a.path,
             onclick: async () => {
               if (!a.path) return;
               state.agent = a.id;
@@ -592,21 +801,59 @@ async function showSettings() {
               renderSidebar();
             },
           },
+          h("span", { class: "radio", "aria-hidden": "true" }),
           h("div", { class: "field", style: "gap:1px;flex:1" }, h("strong", {}, a.label), h("span", { class: "meta" }, a.path ?? "Not installed")),
-          state.agent === a.id ? h("span", { class: "chip busy" }, "Default") : null,
+          a.path ? h("span", { class: "chip ok" }, state.agent === a.id ? "Default" : "Installed") : h("span", { class: "chip" }, "Not found"),
         ),
       ),
     );
   draw();
+
+  const runtimeGrid = h(
+    "div",
+    { class: "runtime-grid" },
+    ...state.runtimes.map((rt) =>
+      h(
+        "div",
+        { class: "runtime-item", title: rt.path ?? "Not found on PATH" },
+        h("span", { class: `dot ${rt.path ? "" : "err"}` }),
+        h("strong", {}, rt.label),
+        h("span", { class: "r-ver" }, rt.version ?? (rt.path ? rt.bin : "Not installed")),
+      ),
+    ),
+  );
+
   modal({
-    title: "AI settings",
+    title: "AI & Polyglot Runtime Settings",
     body: [
-      h("p", { class: "hint", style: "margin:0" }, "BASS BLOCK uses the coding agent you already have installed, in headless mode, inside each block's own folder. It gets no other API keys from BASS BLOCK and can only run ", h("code", {}, "bassblock validate"), "."),
+      h("p", { class: "hint", style: "margin:0" }, "BASS BLOCK uses your installed coding agent and gives it the full list of detected language compilers so it can build blocks in Web/JS/TS, Python, Swift, Rust, C++, Go or Node.js."),
       list,
-      h("div", { class: "field" }, h("label", {}, "BASS BLOCK folder"), h("div", { class: "row" }, h("code", { class: "selectable" }, info.home), h("span", { class: "spacer" }), h("button", { class: "btn small", onclick: () => host.revealHome() }, "Show in Finder"))),
-      h("p", { class: "hint", style: "margin:0" }, `Agents can also build blocks from a terminal: `, h("code", {}, `${info.home}/bin/bassblock help`)),
+      h("div", { class: "field" }, h("label", {}, "Detected Polyglot Language Toolchains"), runtimeGrid),
+      h(
+        "div",
+        { class: "field" },
+        h("label", {}, "External Agent Skill & CLI (Antigravity / Claude Code)"),
+        h(
+          "div",
+          { class: "row" },
+          h("code", { class: "selectable" }, `${info.home}/bin/bassblock`),
+          h("span", { class: "spacer" }),
+          h(
+            "button",
+            {
+              class: "btn small",
+              onclick: async () => {
+                const res = await attempt(() => host.installSkill());
+                if (res) toast(`Installed skill & CLI (${res.installed.length} paths synced)`);
+              },
+            },
+            "Sync Skill & CLI",
+          ),
+          h("button", { class: "btn small", onclick: () => host.revealHome() }, "Show in Finder"),
+        ),
+      ),
     ],
-    foot: [h("span", { class: "hint" }, `BASS BLOCK ${info.version} · ${info.arch}`), h("span", { class: "spacer" })],
+    foot: [h("span", { class: "hint" }, `BASS BLOCK ${info.version} · ${info.platform}/${info.arch}`), h("span", { class: "spacer" })],
   });
 }
 
@@ -624,13 +871,15 @@ host.onAgentEvent(({ blockId, event }: { jobId: string; blockId: string; event: 
   if (event.type === "done") {
     job.done = event;
     refreshBlocks();
-    if (progressFor !== blockId) toast(event.ok ? `✓ ${blockById(blockId)?.name ?? blockId} is ready` : `${blockById(blockId)?.name ?? blockId} needs attention`, event.ok ? "info" : "err");
+    if (progressFor !== blockId && !event.cancelled) {
+      toast(event.ok ? `✓ ${blockById(blockId)?.name ?? blockId} is ready` : `${blockById(blockId)?.name ?? blockId} needs attention`, event.ok ? "info" : "err");
+    }
   } else job.events.push(event);
   if (progressFor === blockId) progressRedraw?.();
   if (state.view === blockId) renderTopbar();
 });
 host.onBlockLog(({ id, level, text }: { id: string; level: string; text: string }) => {
-  if (state.logsOpen && state.view === id) {
+  if (state.logsOpen && (state.view === id || state.splitView === id)) {
     $("#log-list").append(logRow({ level, text }));
     scrollLogs();
   }
@@ -638,7 +887,8 @@ host.onBlockLog(({ id, level, text }: { id: string; level: string; text: string 
 host.onBlockCrashed(({ id, reason }: { id: string; reason: string }) => toast(`${blockById(id)?.name ?? id} stopped (${reason}). Reload to restart it.`, "err"));
 host.onBlockClosed(({ id }: { id: string }) => {
   state.open = state.open.filter((x) => x !== id);
-  if (state.view === id) state.view = "home";
+  if (state.splitView === id) state.splitView = null;
+  if (state.view === id) state.view = state.splitView ?? "home";
   render();
 });
 
@@ -654,6 +904,8 @@ host.onMenu(({ action }: { action: string }) => {
   else if (action === "reload") host.reloadBlock(id);
   else if (action === "edit") showEdit(id);
   else if (action === "undo") undoAi(id);
+  else if (action === "history") showHistory(id);
+  else if (action === "split") toggleSplitMenu();
   else if (action === "logs") toggleLogs();
   else if (action === "devtools") host.devtools(id);
 });
@@ -668,8 +920,9 @@ setInterval(async () => {
 }, 3000);
 
 (async () => {
-  const [agents, settings] = await Promise.all([host.detectAgents(), host.getSettings()]);
+  const [agents, runtimes, settings] = await Promise.all([host.detectAgents(), host.detectRuntimes(), host.getSettings()]);
   state.agents = agents;
+  state.runtimes = runtimes;
   state.agent = agents.find((a: AgentInfo) => a.id === settings.agent && a.path) ? settings.agent : agents.find((a: AgentInfo) => a.path)?.id ?? settings.agent;
   await refreshBlocks();
 })();

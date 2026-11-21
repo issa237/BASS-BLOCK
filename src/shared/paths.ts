@@ -31,12 +31,13 @@ export const paths = {
   binDir: () => path.join(bbHome(), "bin"),
   settingsFile: () => path.join(bbHome(), "state", "settings.json"),
   approvalsFile: () => path.join(bbHome(), "state", "approvals.json"),
-  /** Unix socket the running host listens on so the CLI can talk to it. */
+  /** Unix socket (macOS/Linux) or Named Pipe (Windows) the running host listens on so the CLI can talk to it. */
   hostSocket: () => {
+    const hash = crypto.createHash("sha256").update(bbHome()).digest("hex").slice(0, 12);
+    if (process.platform === "win32") return `\\\\.\\pipe\\bassblock-${hash}`;
     // macOS caps Unix socket paths at 104 bytes; fall back to a short per-home path in the temp dir.
     const p = path.join(bbHome(), "state", "host.sock");
     if (Buffer.byteLength(p) < 100) return p;
-    const hash = crypto.createHash("sha256").update(bbHome()).digest("hex").slice(0, 12);
     return path.join(os.tmpdir(), `bassblock-${hash}.sock`);
   },
 

@@ -10,7 +10,7 @@
     <aside id="sidebar">
       <div class="traffic-space drag"></div>
       <div class="brand drag">
-        <svg class="logo" viewBox="0 0 32 32" aria-hidden="true">
+        <svg class="logo" viewBox="0 0 32 32" aria-hidden="true" focusable="false">
           <rect x="3" y="15" width="12" height="12" rx="3" class="l1" />
           <rect x="17" y="15" width="12" height="12" rx="3" class="l2" />
           <rect x="10" y="3" width="12" height="12" rx="3" class="l3" />
@@ -18,12 +18,12 @@
         <span>BASS BLOCK</span>
       </div>
       <nav class="nav">
-        <button class="nav-item" data-nav="home" id="nav-home">
-          <svg viewBox="0 0 20 20"><path d="M3 3h6v6H3zM11 3h6v6h-6zM3 11h6v6H3zM11 11h6v6h-6z" /></svg>
+        <button class="nav-item" data-nav="home" id="nav-home" aria-label="All blocks">
+          <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M3 3h6v6H3zM11 3h6v6h-6zM3 11h6v6H3zM11 11h6v6h-6z" /></svg>
           All blocks
         </button>
         <button class="nav-item" id="nav-new">
-          <svg viewBox="0 0 20 20"><path d="M10 4v12M4 10h12" /></svg>
+          <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M10 4v12M4 10h12" /></svg>
           New block
         </button>
       </nav>
@@ -38,9 +38,9 @@
       </section>
       <footer class="side-footer">
         <button id="btn-settings" class="nav-item">
-          <svg viewBox="0 0 20 20"><circle cx="10" cy="10" r="2.6" /><path d="M10 2.5v2.2M10 15.3v2.2M2.5 10h2.2M15.3 10h2.2M4.7 4.7l1.6 1.6M13.7 13.7l1.6 1.6M4.7 15.3l1.6-1.6M13.7 6.3l1.6-1.6" /></svg>
+          <svg viewBox="0 0 20 20" aria-hidden="true"><circle cx="10" cy="10" r="2.6" /><path d="M10 2.5v2.2M10 15.3v2.2M2.5 10h2.2M15.3 10h2.2M4.7 4.7l1.6 1.6M13.7 13.7l1.6 1.6M4.7 15.3l1.6-1.6M13.7 6.3l1.6-1.6" /></svg>
           <span>AI settings</span>
-          <span class="agent-pill" id="agent-pill">—</span>
+          <span class="agent-pill" id="agent-pill" aria-live="polite">—</span>
         </button>
       </footer>
     </aside>
@@ -54,7 +54,7 @@
           <div class="log-head">
             <strong>Console</strong>
             <span class="spacer"></span>
-            <button class="btn ghost small" id="log-clear">Clear</button>
+            <button class="btn ghost small" id="log-clear" aria-label="Clear console">Clear</button>
             <button class="btn ghost small" id="log-close">Close</button>
           </div>
           <ol id="log-list"></ol>

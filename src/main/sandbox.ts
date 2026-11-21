@@ -7,6 +7,7 @@
  */
 import fs from "node:fs";
 import path from "node:path";
+import { stripTypeScriptTypes } from "node:module";
 import { protocol, session, type Session, type WebContents, type WebPreferences } from "electron";
 import type { BlockManifest } from "../shared/blocks";
 import { safeJoin } from "../shared/paths";
@@ -39,6 +40,7 @@ const MIME: Record<string, string> = {
   ".html": "text/html; charset=utf-8",
   ".js": "text/javascript; charset=utf-8",
   ".mjs": "text/javascript; charset=utf-8",
+  ".ts": "text/javascript; charset=utf-8",
   ".css": "text/css; charset=utf-8",
   ".json": "application/json; charset=utf-8",
   ".svg": "image/svg+xml",
@@ -87,30 +89,35 @@ export const blockContexts = {
 };
 
 const configured = new WeakSet<Session>();
+const sessionDirs = new Map<string, { blockId: string; codeDir: string }>();
 
 /**
- * Configure (once) the isolated session for a block. `codeDir` is looked up through
- * `resolveCodeDir` on every request so a validation run and the live host can share code.
+ * Configure (once) the isolated session for a block. `codeDir` is updated in `sessionDirs`
+ * and looked up dynamically on every request so recreated blocks or validation runs never use a stale path.
  */
 export function blockSession(partition: string, blockId: string, codeDir: string): Session {
+  sessionDirs.set(partition, { blockId, codeDir });
   const ses = session.fromPartition(partition, { cache: true });
   if (configured.has(ses)) return ses;
   configured.add(ses);
 
   ses.protocol.handle(BLOCK_SCHEME, async (req) => {
+    const active = sessionDirs.get(partition) ?? { blockId, codeDir };
     const url = new URL(req.url);
-    if (url.host !== blockId) return new Response("Forbidden: other block", { status: 403 });
+    if (url.host !== active.blockId) return new Response("Forbidden: other block", { status: 403 });
     let rel = decodeURIComponent(url.pathname);
-    if (rel.split("/").some((seg) => seg.startsWith("."))) return new Response("Forbidden", { status: 403 });
-    let file = safeJoin(codeDir, rel);
+    if (rel.split("/").some((seg) => seg.startsWith(".") && seg !== ".bin")) return new Response("Forbidden", { status: 403 });
+    let file = safeJoin(active.codeDir, rel);
     if (!file) return new Response("Forbidden", { status: 403 });
     try {
       if (fs.statSync(file).isDirectory()) file = path.join(file, "index.html");
-      const body = await fs.promises.readFile(file);
+      const ext = path.extname(file).toLowerCase();
+      const raw = await fs.promises.readFile(file);
+      const body = ext === ".ts" && typeof stripTypeScriptTypes === "function" ? Buffer.from(stripTypeScriptTypes(raw.toString("utf8")), "utf8") : raw;
       return new Response(body, {
         status: 200,
         headers: {
-          "content-type": MIME[path.extname(file).toLowerCase()] ?? "application/octet-stream",
+          "content-type": MIME[ext] ?? "application/octet-stream",
           "content-security-policy": BLOCK_CSP,
           "x-content-type-options": "nosniff",
           "cache-control": "no-store",
@@ -121,11 +128,12 @@ export function blockSession(partition: string, blockId: string, codeDir: string
     }
   });
 
-  // Hard network wall: the page may only load its own files. Network goes through bb.net.fetch.
+  // Hard network wall: the page may only load its own files. Network goes through bb.net.fetch or bb.backend.
   ses.webRequest.onBeforeRequest((details, cb) => {
+    const active = sessionDirs.get(partition) ?? { blockId, codeDir };
     const u = details.url;
     const allowed =
-      u.startsWith(`${BLOCK_SCHEME}://${blockId}/`) || u.startsWith("data:") || u.startsWith("blob:") || u.startsWith("devtools://") || u.startsWith("chrome-extension://");
+      u.startsWith(`${BLOCK_SCHEME}://${active.blockId}/`) || u.startsWith("data:") || u.startsWith("blob:") || u.startsWith("devtools://") || u.startsWith("chrome-extension://");
     cb({ cancel: !allowed });
   });
 
@@ -135,6 +143,18 @@ export function blockSession(partition: string, blockId: string, codeDir: string
   ses.setDevicePermissionHandler(() => false);
   ses.on("will-download", (e) => e.preventDefault());
   return ses;
+}
+
+/** Unregister protocol and webRequest handlers for temporary validation partitions. */
+export async function cleanupBlockSession(partition: string): Promise<void> {
+  sessionDirs.delete(partition);
+  try {
+    const ses = session.fromPartition(partition, { cache: false });
+    if (ses.protocol.isProtocolHandled(BLOCK_SCHEME)) ses.protocol.unhandle(BLOCK_SCHEME);
+    ses.webRequest.onBeforeRequest(null);
+    ses.webRequest.onErrorOccurred(null);
+    await ses.clearStorageData();
+  } catch {}
 }
 
 export function blockWebPreferences(partition: string, preload: string): WebPreferences {

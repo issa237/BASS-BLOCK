@@ -1,19 +1,23 @@
 /**
  * bassblock CLI — the interface agents (and people) use to build blocks.
  *
- *   bassblock create <id> [--name "…"] [--template blank|text-tool|image-tool|three-viewer]
+ *   bassblock create <id> [--name "…"] [--template blank|text-tool|image-tool|three-viewer|python-tool|swift-tool]
  *   bassblock validate [dir|id] [--json]
  *   bassblock run <id>
  *   bassblock reload <id>
  *   bassblock list [--json]
+ *   bassblock runtimes [--json]
+ *   bassblock install-skill
  *   bassblock docs | schema
  */
 import fs from "node:fs";
 import net from "node:net";
+import os from "node:os";
 import path from "node:path";
 import { spawn } from "node:child_process";
 import { createBlock, listBlocks, TEMPLATES, ID_PATTERN, type TemplateName, type Problem } from "../shared/blocks";
 import { APP_ARGS, SDK_DIR, SKILL_PATH, bbHome, paths } from "../shared/paths";
+import { detectRuntimes } from "../main/runtimes";
 
 const [cmd, ...rest] = process.argv.slice(2);
 
@@ -95,7 +99,14 @@ async function validate() {
   });
   const line = out.split("\n").find((l) => l.startsWith("BBRESULT:"));
   if (!line) die("validator did not produce a result (Electron failed to start?)");
-  const result = JSON.parse(line.slice("BBRESULT:".length)) as { ok: boolean; id?: string; problems: Problem[]; warnings: string[]; screenshot?: string; loadMs?: number };
+  const result = JSON.parse(line.slice("BBRESULT:".length)) as {
+    ok: boolean;
+    id?: string;
+    problems: Problem[];
+    warnings: string[];
+    screenshot?: string;
+    loadMs?: number;
+  };
 
   if (json) {
     process.stdout.write(JSON.stringify(result, null, 2) + "\n");
@@ -149,11 +160,53 @@ async function main() {
     case "list": {
       const blocks = listBlocks();
       if (flag("json") !== undefined) {
-        process.stdout.write(JSON.stringify(blocks.map((b) => ({ id: b.id, ok: b.ok, name: b.manifest?.name, version: b.manifest?.version, error: b.error })), null, 2) + "\n");
+        process.stdout.write(
+          JSON.stringify(
+            blocks.map((b) => ({
+              id: b.id,
+              ok: b.ok,
+              name: b.manifest?.name,
+              version: b.manifest?.version,
+              mode: b.manifest?.mode,
+              language: b.manifest?.backend?.language ?? null,
+              error: b.error,
+            })),
+            null,
+            2,
+          ) + "\n",
+        );
         break;
       }
       if (!blocks.length) process.stdout.write(`No blocks yet in ${paths.blocksDir()}\n`);
-      for (const b of blocks) process.stdout.write(`${b.ok ? "●" : "✗"} ${b.id.padEnd(28)} ${b.manifest?.name ?? ""} ${b.manifest?.version ?? ""}${b.error ? `  (${b.error})` : ""}\n`);
+      for (const b of blocks)
+        process.stdout.write(
+          `${b.ok ? "●" : "✗"} ${b.id.padEnd(28)} ${b.manifest?.name ?? ""} ${b.manifest?.version ?? ""}${b.manifest?.backend?.language ? ` [${b.manifest.backend.language}]` : ""}${b.error ? `  (${b.error})` : ""}\n`,
+        );
+      break;
+    }
+    case "runtimes": {
+      const rts = detectRuntimes(true);
+      if (flag("json") !== undefined) {
+        process.stdout.write(JSON.stringify(rts, null, 2) + "\n");
+        break;
+      }
+      for (const r of rts) {
+        process.stdout.write(`${r.path ? "✓" : "✗"} ${r.label.padEnd(24)} ${r.version ?? "not found"}${r.path ? `  (${r.path})` : ""}\n`);
+      }
+      break;
+    }
+    case "install-skill": {
+      const home = os.homedir();
+      const targets = [
+        path.join(home, ".gemini", "antigravity", "skills", "bass-block-builder", "SKILL.md"),
+        path.join(home, ".claude", "skills", "bass-block-builder", "SKILL.md"),
+      ];
+      const skillContent = fs.readFileSync(SKILL_PATH, "utf8");
+      for (const t of targets) {
+        fs.mkdirSync(path.dirname(t), { recursive: true });
+        fs.writeFileSync(t, skillContent, "utf8");
+        process.stdout.write(`Installed skill → ${t}\n`);
+      }
       break;
     }
     case "docs":
@@ -173,10 +226,12 @@ async function main() {
 
   bassblock create <id> [--name "Name"] [--template ${TEMPLATES.join("|")}]
   bassblock validate [dir|id] [--json] [--screenshot file.png]
-                                 schema + files + headless launch in the real sandbox
+                                 schema + files + backend + headless launch in the real sandbox
   bassblock run <id>             open a block in the BASS BLOCK app
   bassblock reload <id>          reload a block that is open in the app
   bassblock list [--json]        list installed blocks
+  bassblock runtimes [--json]    list detected language compilers & runtimes
+  bassblock install-skill        install the bass-block-builder skill for Antigravity & Claude
   bassblock docs                 print the block-building guide (SKILL.md)
   bassblock schema               print the block.json JSON Schema
   bassblock home                 print the BASS BLOCK home folder (${bbHome()})
