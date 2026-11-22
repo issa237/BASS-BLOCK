@@ -52,6 +52,7 @@ interface Settings {
 
 let win: BrowserWindow | null = null;
 const views = new Map<string, OpenView>();
+const opening = new Map<string, Promise<BlockManifest>>();
 let activeId: string | null = null;
 let splitId: string | null = null;
 let primaryBounds: Rectangle = { x: 0, y: 0, width: 0, height: 0 };
@@ -131,50 +132,67 @@ async function openBlock(id: string, asSplit = false): Promise<BlockManifest> {
     else showBlock(id, splitId === id ? null : splitId);
     return existing.ctx.manifest;
   }
-  const manifest = loadManifestOrThrow(id);
-  if (!(await ensureApproved(manifest))) throw new Error("You didn't allow this block's permissions, so it wasn't opened.");
+  const inFlight = opening.get(id);
+  if (inFlight) return inFlight;
 
-  const partition = `persist:block-${id}`;
-  const codeDir = paths.codeDir(id);
-  const dataDir = paths.dataDir(id);
-  blockSession(partition, id, codeDir);
-  fs.mkdirSync(dataDir, { recursive: true });
-  fs.mkdirSync(paths.metaDir(id), { recursive: true });
+  const p = (async () => {
+    const manifest = loadManifestOrThrow(id);
+    if (!(await ensureApproved(manifest))) throw new Error("You didn't allow this block's permissions, so it wasn't opened.");
+    if (!win) throw new Error("no window");
 
-  const view = new WebContentsView({ webPreferences: blockWebPreferences(partition, BLOCK_PRELOAD) });
-  view.setBackgroundColor(viewBgColor());
-  const wc = view.webContents;
-  const ctx: BlockContext = { blockId: id, codeDir, dataDir, manifest, validating: false, ready: false };
-  blockContexts.set(wc, ctx);
-  lockNavigation(wc, id);
-  wc.on("console-message", (...args: unknown[]) => {
-    const d = consoleDetails(args);
-    if (/Electron Security Warning/.test(d.message)) return;
-    pushLog(id, d.level === "warning" ? "warn" : d.level, d.message);
-  });
-  wc.on("render-process-gone", (_e, d) => {
-    pushLog(id, "error", `Block process ended: ${d.reason}`);
-    win?.webContents.send("host:block-crashed", { id, reason: d.reason });
-  });
-  wc.on("did-fail-load", (_e, code, desc, url) => {
-    if (code !== -3) pushLog(id, "error", `Failed to load ${url}: ${desc}`);
-  });
+    const partition = `persist:block-${id}`;
+    const codeDir = paths.codeDir(id);
+    const dataDir = paths.dataDir(id);
+    blockSession(partition, id, codeDir);
+    fs.mkdirSync(dataDir, { recursive: true });
+    fs.mkdirSync(paths.metaDir(id), { recursive: true });
 
-  if (manifest.mode === "polyglot" && manifest.backend) {
-    try {
-      await ensureBackend({ key: backendKey(id, wc.id, false), blockId: id, wcId: wc.id, codeDir, dataDir, manifest });
-    } catch (e) {
-      pushLog(id, "error", `Backend startup failed: ${(e as Error).message}`);
+    const view = new WebContentsView({ webPreferences: blockWebPreferences(partition, BLOCK_PRELOAD) });
+    view.setBackgroundColor(viewBgColor());
+    const wc = view.webContents;
+    const ctx: BlockContext = { blockId: id, codeDir, dataDir, manifest, validating: false, ready: false };
+    blockContexts.set(wc, ctx);
+    lockNavigation(wc, id);
+    wc.on("console-message", (...args: unknown[]) => {
+      const d = consoleDetails(args);
+      if (/Electron Security Warning/.test(d.message)) return;
+      pushLog(id, d.level === "warning" ? "warn" : d.level, d.message);
+    });
+    wc.on("render-process-gone", (_e, d) => {
+      pushLog(id, "error", `Block process ended: ${d.reason}`);
+      win?.webContents.send("host:block-crashed", { id, reason: d.reason });
+    });
+    wc.on("did-fail-load", (_e, code, desc, url) => {
+      if (code !== -3) pushLog(id, "error", `Failed to load ${url}: ${desc}`);
+    });
+
+    // Record the view immediately so clicking the block while its backend compiles never opens a second view.
+    views.set(id, { view, ctx });
+    win.contentView.addChildView(view);
+    if (asSplit && activeId && activeId !== id) showBlock(activeId, id);
+    else showBlock(id, splitId === id ? null : splitId);
+    applyViewBounds();
+
+    if (manifest.mode === "polyglot" && manifest.backend) {
+      try {
+        await ensureBackend({ key: backendKey(id, wc.id, false), blockId: id, wcId: wc.id, codeDir, dataDir, manifest });
+      } catch (e) {
+        pushLog(id, "error", `Backend startup failed: ${(e as Error).message}`);
+      }
     }
-  }
 
-  views.set(id, { view, ctx });
-  win.contentView.addChildView(view);
-  if (asSplit && activeId && activeId !== id) showBlock(activeId, id);
-  else showBlock(id, splitId === id ? null : splitId);
-  applyViewBounds();
-  await wc.loadURL(blockUrl(manifest)).catch((e) => pushLog(id, "error", String(e.message ?? e)));
-  return manifest;
+    if (views.get(id)?.view === view) {
+      await wc.loadURL(blockUrl(manifest)).catch((e) => pushLog(id, "error", String(e.message ?? e)));
+    }
+    return manifest;
+  })();
+
+  opening.set(id, p);
+  try {
+    return await p;
+  } finally {
+    opening.delete(id);
+  }
 }
 
 function applyViewBounds() {
@@ -447,9 +465,24 @@ export function installExternalSkill(): { installed: string[] } {
     const localBin = path.join(home, ".local", "bin", "bassblock");
     try {
       fs.mkdirSync(path.dirname(localBin), { recursive: true });
-      if (fs.existsSync(localBin)) fs.unlinkSync(localBin);
-      fs.symlinkSync(binShim, localBin);
-      installed.push(localBin);
+      let canReplace = false;
+      try {
+        const st = fs.lstatSync(localBin);
+        if (st.isSymbolicLink()) {
+          const target = fs.readlinkSync(localBin);
+          if (target === binShim || /bassblock/i.test(target)) {
+            fs.unlinkSync(localBin);
+            canReplace = true;
+          }
+        }
+      } catch {
+        // Does not exist yet
+        canReplace = true;
+      }
+      if (canReplace) {
+        fs.symlinkSync(binShim, localBin);
+        installed.push(localBin);
+      }
     } catch {}
   }
   return { installed };
@@ -689,9 +722,6 @@ export function startHost(opts: { openId?: string; snapshot?: string }) {
     }
     fs.mkdirSync(paths.blocksDir(), { recursive: true });
     installCliShim();
-    try {
-      installExternalSkill();
-    } catch {}
     installHostIpc();
     startSocketServer();
     watchBlocks();

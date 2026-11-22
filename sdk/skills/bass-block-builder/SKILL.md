@@ -119,7 +119,7 @@ If `"protocol": "http"` is set, the host assigns a free port in `process.env.BB_
 
 - **No remote sub-resources.** No CDN `<script src="https://…">`, no Google Fonts, no remote `<img src="https://…">`, no `import … from "https://…"`. Normal external clickable links (`<a href="https://…">`) are allowed and open in the user's browser.
   If you need a JS library, write the code yourself or vendor a small file into the block folder (`vendor/lib.js`). `three.js` is available to copy from the `three-viewer` template (`vendor/three.min.js`).
-- **No inline scripts.** All JS/TS goes in `.js` or `.ts` files loaded with `<script type="module" src="main.js"></script>` (or `main.ts` — BASS BLOCK strips TypeScript types automatically!).
+- **No inline scripts.** All JS/TS goes in `.js` or `.ts` files loaded with `<script type="module" src="main.js"></script>` (or `main.ts` — BASS BLOCK uses Node's built-in type stripping on `.ts` files, so standard TypeScript type annotations, interfaces, and type aliases work out of the box; do not use `enum`, `namespace`, or `.tsx`/JSX, and always spell out the `.ts` or `.js` file extension in relative `import` paths).
   No `onclick="…"` attributes in HTML; use `addEventListener`.
 - No `eval` / `new Function`. WebAssembly is allowed.
 - `fetch()` in the UI works only for the block's own files (relative URLs). For the internet, use `bb.net.fetch` with a declared permission. For a local backend, use `bb.backend.call` or `bb.backend.fetch`.

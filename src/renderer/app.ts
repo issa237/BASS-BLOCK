@@ -91,7 +91,7 @@ const ICONS = {
 };
 const bicon = (emoji: string, lg = false) => h("span", { class: `bicon ${lg ? "lg" : ""}`, "aria-hidden": "true" }, emoji);
 const PERM_CHIPS: [RegExp, string, string][] = [
-  [/^Run local/, "Polyglot", ICONS.terminal],
+  [/^Run a? ?local/, "Polyglot", ICONS.terminal],
   [/^Read and write files/, "Files", ICONS.file],
   [/^Connect/, "Network", ICONS.globe],
   [/clipboard/, "Clipboard", ICONS.clipboard],

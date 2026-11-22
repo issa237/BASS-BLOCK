@@ -27,12 +27,7 @@
       "additionalProperties": false,
       "required": ["ui"],
       "properties": {
-        "ui": { "type": "string", "pattern": "^[A-Za-z0-9_./-]+\\.html$" },
-        "script": {
-          "type": "string",
-          "pattern": "^[A-Za-z0-9_./-]+\\.(ts|tsx|js|mjs)$",
-          "description": "Optional TypeScript/ES module entry automatically bundled by BASS BLOCK into bundle.js."
-        }
+        "ui": { "type": "string", "pattern": "^[A-Za-z0-9_./-]+\\.html$" }
       }
     },
     "backend": {

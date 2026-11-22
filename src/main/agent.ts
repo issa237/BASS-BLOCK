@@ -116,6 +116,7 @@ function agentArgs(agent: AgentId, prompt: string, codeDir: string): string[] {
         "--approval-mode", "auto_edit",
         "--allowed-tools", "run_shell_command(bassblock validate)",
         "--include-directories", TEMPLATES_DIR,
+        "--skip-trust",
         "-o", "stream-json",
       ];
     case "codex":

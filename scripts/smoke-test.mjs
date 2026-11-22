@@ -36,6 +36,17 @@ for (const t of ["blank", "text-tool", "image-tool", "three-viewer", "python-too
   check(`validate ${t}`, v.status === 0 && r.ok, JSON.stringify(r.problems));
 }
 
+// 2b. Two concurrent backend calls at startup (while backend is compiling/starting) both succeed
+const swiftCode = path.join(home, "blocks/s-swift-tool/code");
+fs.rmSync(path.join(swiftCode, ".bin"), { recursive: true, force: true });
+fs.writeFileSync(
+  path.join(swiftCode, "main.js"),
+  'const [a, b] = await Promise.all([bb.backend.call("info"), bb.backend.call("compute", { text: "parallel", limit: 5000 })]);\nif (!a?.cores || !b?.sha256) throw new Error("concurrent calls failed");\ndocument.getElementById("raw").textContent = b.sha256;\nbb.ready();\n',
+);
+const parV = cli("validate", "s-swift-tool", "--json");
+const parR = JSON.parse(parV.stdout || "{}");
+check("concurrent startup backend calls both succeed", parV.status === 0 && parR.ok, JSON.stringify(parR.problems));
+
 // 3. Native TypeScript (.ts) script + <a href="https://..."> external link allowed in staticCheck
 cli("create", "s-ts-link", "--template", "blank");
 const tsDir = path.join(home, "blocks/s-ts-link/code");
@@ -80,7 +91,12 @@ check(
 const lib = path.join(home, "lib.cjs");
 await build({ entryPoints: [path.join(root, "src/shared/blocks.ts")], bundle: true, platform: "node", format: "cjs", outfile: lib, logLevel: "silent" });
 process.env.BASSBLOCK_HOME = home;
-const { history } = require(lib);
+const { history, describePermissions, readManifest } = require(lib);
+history.snapshot("s-swift-tool", "After Swift build");
+const trackedSwiftFiles = spawnSync("git", ["ls-files"], { cwd: swiftCode, encoding: "utf8" }).stdout || "";
+check(".bin/ binaries excluded from block git history", !trackedSwiftFiles.split("\n").some((f) => f.startsWith(".bin/")));
+const swiftPerms = describePermissions(readManifest(swiftCode).manifest);
+check("polyglot permission prompt warns about full Mac access", swiftPerms.some((p) => /full access/i.test(p)), JSON.stringify(swiftPerms));
 const id = "s-text-tool";
 const code = path.join(home, "blocks", id, "code");
 const data = path.join(home, "blocks", id, "data");

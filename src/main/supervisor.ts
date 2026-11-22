@@ -47,6 +47,9 @@ interface BackendInstance {
 }
 
 const instances = new Map<string, BackendInstance>();
+const crashHistory = new Map<string, { times: number[]; lastError?: string }>();
+const MAX_CRASHES_IN_WINDOW = 3;
+const CRASH_WINDOW_MS = 10000;
 
 export function backendKey(blockId: string, wcId: number, validating: boolean): string {
   return validating ? `val:${wcId}:${blockId}` : `live:${blockId}`;
@@ -76,14 +79,14 @@ function parseCommand(cmd: string | string[]): { bin: string; args: string[]; sh
   return { bin: cmd, args: [], shell: true };
 }
 
-/** Hash backend source files + build command so compiled languages (Swift, Rust, C++, Go) only recompile when changed. */
+/** Hash source files in `codeDir` + build command so compiled languages (Swift, Rust, C++, Go) only recompile when changed. */
 function computeBuildHash(codeDir: string, buildCmd: string | string[]): string {
   const h = crypto.createHash("sha256");
   h.update(JSON.stringify(buildCmd));
   const walk = (dir: string) => {
     if (!fs.existsSync(dir)) return;
-    for (const ent of fs.readdirSync(dir, { withFileTypes: true })) {
-      if (ent.name === ".git" || ent.name === ".bin" || ent.name === "node_modules" || ent.name === "target") continue;
+    for (const ent of fs.readdirSync(dir, { withFileTypes: true }).sort((a, b) => a.name.localeCompare(b.name))) {
+      if (ent.name === ".git" || ent.name === ".bin" || ent.name === "node_modules" || ent.name === "target" || ent.name === "__pycache__") continue;
       const p = path.join(dir, ent.name);
       if (ent.isDirectory()) walk(p);
       else if (ent.isFile()) {
@@ -92,9 +95,7 @@ function computeBuildHash(codeDir: string, buildCmd: string | string[]): string 
       }
     }
   };
-  walk(path.join(codeDir, "backend"));
-  const manifestFile = path.join(codeDir, "block.json");
-  if (fs.existsSync(manifestFile)) h.update(fs.readFileSync(manifestFile));
+  walk(codeDir);
   return h.digest("hex").slice(0, 24);
 }
 
@@ -128,8 +129,8 @@ async function runBuildStep(blockId: string, codeDir: string, dataDir: string, b
       try {
         child.kill("SIGKILL");
       } catch {}
-      reject(new Error("Backend compilation timed out after 60s"));
-    }, 60000);
+      reject(new Error("Backend compilation timed out after 180s"));
+    }, 180000);
     child.on("error", (err) => {
       clearTimeout(timer);
       reject(new Error(`Failed to run build command '${bin}': ${err.message}`));
@@ -185,12 +186,23 @@ export async function ensureBackend(opts: {
   manifest: BlockManifest;
 }): Promise<BackendInstance> {
   const existing = instances.get(opts.key);
-  if (existing && !existing.stopped && existing.child && existing.child.exitCode === null) {
+  if (existing && !existing.stopped && (!existing.child || existing.child.exitCode === null)) {
     existing.wcId = opts.wcId;
     await existing.ready;
     return existing;
   }
-  if (existing) stopBackend(opts.key);
+  if (existing) stopBackend(opts.key, false);
+
+  const crashes = crashHistory.get(opts.key);
+  if (crashes) {
+    const now = Date.now();
+    crashes.times = crashes.times.filter((t) => now - t < CRASH_WINDOW_MS);
+    if (crashes.times.length >= MAX_CRASHES_IN_WINDOW) {
+      throw new Error(
+        `Backend crashed ${crashes.times.length} times in ${CRASH_WINDOW_MS / 1000}s${crashes.lastError ? ` (${crashes.lastError})` : ""}. Reload the block after fixing the backend.`,
+      );
+    }
+  }
 
   const backend = opts.manifest.backend;
   if (opts.manifest.mode !== "polyglot" || !backend) {
@@ -296,6 +308,10 @@ export async function ensureBackend(opts: {
       }
       inst.pending.clear();
       if (!inst.stopped && code !== 0 && code !== null) {
+        const rec = crashHistory.get(opts.key) ?? { times: [] };
+        rec.times.push(Date.now());
+        rec.lastError = inst.lastError || `exit code ${code}`;
+        crashHistory.set(opts.key, rec);
         logFn(opts.blockId, "error", `[backend] Process exited with code ${code}${inst.lastError ? `: ${inst.lastError}` : ""}`);
       }
     });
@@ -315,7 +331,7 @@ export async function ensureBackend(opts: {
     await inst.ready;
     return inst;
   } catch (e) {
-    stopBackend(opts.key);
+    stopBackend(opts.key, false);
     throw e;
   }
 }
@@ -375,7 +391,8 @@ export async function fetchBackend(
   return { status: res.status, ok: res.ok, headers, body };
 }
 
-export function stopBackend(key: string): void {
+export function stopBackend(key: string, resetCrashHistory = true): void {
+  if (resetCrashHistory) crashHistory.delete(key);
   const inst = instances.get(key);
   if (!inst) return;
   inst.stopped = true;

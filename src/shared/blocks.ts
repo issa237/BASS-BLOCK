@@ -38,7 +38,7 @@ export interface BlockManifest {
   version: string;
   mode: "web" | "polyglot";
   sdk: string;
-  entry: { ui: string; script?: string };
+  entry: { ui: string };
   backend?: BlockBackend;
   permissions?: BlockPermissions;
   io?: { inputs?: BlockPort[]; outputs?: BlockPort[] };
@@ -100,7 +100,7 @@ export function describePermissions(m: BlockManifest): string[] {
   const out: string[] = [];
   if (m.mode === "polyglot" && m.backend) {
     const cmd = Array.isArray(m.backend.run) ? m.backend.run.join(" ") : m.backend.run;
-    out.push(`Run local ${m.backend.language} backend (${cmd})`);
+    out.push(`Run a local ${m.backend.language} backend (${cmd}) — runs outside the web sandbox with full access to your Mac's files and network`);
   }
   if (p.fs === "user-picked-files") out.push("Read and write files that you pick in a file dialog");
   if (p.network === true) out.push("Connect to any HTTPS website");
@@ -148,16 +148,10 @@ export function staticCheck(codeDir: string, expectedId?: string): { manifest?: 
   if (!entry || !fs.existsSync(entry)) {
     problems.push({ step: "files", file: manifest.entry.ui, message: `entry.ui file '${manifest.entry.ui}' does not exist` });
   }
-  if (manifest.entry.script) {
-    const scriptPath = safeJoin(codeDir, manifest.entry.script);
-    if (!scriptPath || !fs.existsSync(scriptPath)) {
-      problems.push({ step: "files", file: manifest.entry.script, message: `entry.script file '${manifest.entry.script}' does not exist` });
-    }
-  }
 
   // Remote sub-resources are blocked by the sandbox; catch them early without flagging <a href="https://..."> links.
   for (const f of walk(codeDir)) {
-    if (!/\.(html|css|js|mjs|ts|tsx)$/.test(f)) continue;
+    if (!/\.(html|css|js|mjs|ts)$/.test(f)) continue;
     const rel = path.relative(codeDir, f);
     if (rel.startsWith("backend" + path.sep) || rel.startsWith(".bin" + path.sep)) continue;
     const text = fs.readFileSync(f, "utf8");
@@ -199,7 +193,7 @@ export function staticCheck(codeDir: string, expectedId?: string): { manifest?: 
           message: `Loads a remote CSS resource (${remoteCss[0].slice(0, 80)}). Vendor fonts/styles into the block folder instead.`,
         });
       }
-    } else if (/\.(js|mjs|ts|tsx)$/.test(f)) {
+    } else if (/\.(js|mjs|ts)$/.test(f)) {
       const remoteImport = text.match(/\bfrom\s+["'](https?:)?\/\/[^"']+["']|\bimport\s*\(\s*["'](https?:)?\/\/[^"']+["']/);
       if (remoteImport) {
         problems.push({
@@ -330,10 +324,32 @@ export interface HistoryEntry {
   at: number;
 }
 
+const BLOCK_GITIGNORE = ".bin/\ntarget/\n__pycache__/\n*.pyc\n.DS_Store\n";
+
+function ensureBlockGitignore(codeDir: string): void {
+  const file = path.join(codeDir, ".gitignore");
+  if (!fs.existsSync(file)) {
+    fs.writeFileSync(file, BLOCK_GITIGNORE, "utf8");
+    return;
+  }
+  const cur = fs.readFileSync(file, "utf8");
+  if (!cur.split(/\r?\n/).some((l) => l.trim() === ".bin" || l.trim() === ".bin/")) {
+    fs.writeFileSync(file, cur.replace(/\s*$/, "\n") + ".bin/\n", "utf8");
+  }
+}
+
+function isIgnoredBuildArtifact(codeDir: string, srcPath: string): boolean {
+  const rel = path.relative(codeDir, srcPath);
+  if (!rel) return false;
+  const first = rel.split(path.sep)[0];
+  return first === ".bin" || first === ".git" || first === "target" || first === "__pycache__";
+}
+
 export const history = {
   snapshot(id: string, message: string): void {
     const code = paths.codeDir(id);
     if (!fs.existsSync(code)) return;
+    ensureBlockGitignore(code);
     if (hasGit()) {
       if (!fs.existsSync(path.join(code, ".git"))) git(code, ["init", "-q", "-b", "main"]);
       git(code, ["add", "-A"]);
@@ -342,7 +358,10 @@ export const history = {
     }
     const dir = path.join(paths.metaDir(id), "snapshots", `${Date.now()}`);
     fs.mkdirSync(dir, { recursive: true });
-    fs.cpSync(code, path.join(dir, "code"), { recursive: true });
+    fs.cpSync(code, path.join(dir, "code"), {
+      recursive: true,
+      filter: (src) => !isIgnoredBuildArtifact(code, src),
+    });
     fs.writeFileSync(path.join(dir, "message.txt"), message);
   },
 
