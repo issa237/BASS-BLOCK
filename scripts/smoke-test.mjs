@@ -22,10 +22,14 @@ const check = (name, ok, extra = "") => {
   if (!ok) failed++;
 };
 
-// 1. Runtimes detection
+// 1. Runtimes detection + install guides
 const rtOut = cli("runtimes", "--json");
 const runtimes = JSON.parse(rtOut.stdout || "[]");
 check("detects local language runtimes", rtOut.status === 0 && Array.isArray(runtimes) && runtimes.some((r) => r.id === "python" && r.path));
+check(
+  "every language runtime includes install guide steps & commands",
+  Array.isArray(runtimes) && runtimes.length >= 8 && runtimes.every((r) => r.install?.steps?.length > 0 && r.install?.verifyCmd && r.install?.docsUrl),
+);
 
 // 2. All 6 templates (web + polyglot Python + polyglot compiled Swift)
 for (const t of ["blank", "text-tool", "image-tool", "three-viewer", "python-tool", "swift-tool"]) {
@@ -194,6 +198,40 @@ srv.close();
 check(
   "direct API agent writes block files and passes validation",
   apiRes.ok && fs.readFileSync(path.join(home, "blocks/s-blank/code/main.js"), "utf8").includes("Built by Free API Model"),
+);
+
+// 9. Skill importer (local skill folder + remote skill link)
+const slib = path.join(home, "skill.cjs");
+await build({ entryPoints: [path.join(root, "src/main/skillImport.ts")], bundle: true, platform: "node", format: "cjs", outfile: slib, logLevel: "silent" });
+const { fetchSkillFromLink } = require(slib);
+
+const sampleSkillDir = path.join(home, "sample-skill");
+fs.mkdirSync(path.join(sampleSkillDir, "scripts"), { recursive: true });
+fs.writeFileSync(
+  path.join(sampleSkillDir, "SKILL.md"),
+  "---\nname: Sprite Sheet Slicer\ndescription: Slice 2D game sprite sheets into individual frames.\n---\n\n# Sprite Sheet Slicer\n\nInstructions for slicing sprite sheets.\n",
+);
+fs.writeFileSync(path.join(sampleSkillDir, "scripts", "slice.py"), "print('slicing')\n");
+const importedLocal = await fetchSkillFromLink(sampleSkillDir);
+check(
+  "imports skill from local folder with frontmatter and scripts",
+  importedLocal.name === "Sprite Sheet Slicer" &&
+    importedLocal.description.includes("Slice 2D game sprite sheets") &&
+    importedLocal.scripts.length === 1 &&
+    importedLocal.scripts[0].name === "slice.py",
+);
+
+const skillSrv = http.createServer((_req, res) => {
+  res.writeHead(200, { "Content-Type": "text/markdown" });
+  res.end("---\nname: Audio Spectrum Analyzer\ndescription: Real-time FFT audio spectrum visualizer.\n---\n# Audio Spectrum\nUse Web Audio API.");
+});
+await new Promise((r) => skillSrv.listen(0, "127.0.0.1", r));
+const skillPort = skillSrv.address().port;
+const importedRemote = await fetchSkillFromLink(`http://127.0.0.1:${skillPort}/SKILL.md`);
+skillSrv.close();
+check(
+  "imports skill from remote URL link",
+  importedRemote.name === "Audio Spectrum Analyzer" && importedRemote.description.includes("Real-time FFT"),
 );
 
 fs.rmSync(alib, { force: true });

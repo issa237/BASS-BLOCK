@@ -35,6 +35,7 @@ import { detectAgents, runAgentJob, type AgentId, type AgentJob, type CustomAgen
 import { clearBlockHandles, setBlockLogSink } from "./bbApi";
 import { testDirectApi } from "./directAgent";
 import { detectRuntimes, findBinary } from "./runtimes";
+import { fetchSkillFromLink } from "./skillImport";
 import { blockContexts, blockSession, blockUrl, blockWebPreferences, consoleDetails, lockNavigation, type BlockContext } from "./sandbox";
 import { backendKey, ensureBackend, stopAllBackends, stopBackend } from "./supervisor";
 import { validateBlock } from "./validate";
@@ -589,6 +590,19 @@ function installHostIpc() {
   });
   hostHandle("host:detectRuntimes", () => detectRuntimes(true));
   hostHandle("host:installSkill", () => installExternalSkill());
+  hostHandle("host:openExternal", (url: string) => {
+    if (typeof url === "string" && /^https:\/\//i.test(url)) return shell.openExternal(url);
+  });
+  hostHandle("host:previewSkill", (source: string) => fetchSkillFromLink(source));
+  hostHandle("host:pickSkillFile", async () => {
+    const res = await dialog.showOpenDialog(win!, {
+      title: "Select a SKILL.md File or Skill Folder",
+      properties: ["openFile", "openDirectory"],
+      filters: [{ name: "Skill Markdown", extensions: ["md", "markdown", "txt"] }],
+    });
+    if (res.canceled || !res.filePaths[0]) return null;
+    return fetchSkillFromLink(res.filePaths[0]);
+  });
   hostHandle("host:createFromTemplate", (name: string, template: TemplateName) => {
     const id = uniqueId(name || template);
     createBlock({ id, name: name || undefined, template });
@@ -681,9 +695,10 @@ function installHostIpc() {
     return out;
   });
 
-  hostHandle("host:startAgent", async (req: { kind: "create" | "edit"; id?: string; request: string; agent?: AgentId }) => {
-    const request = String(req.request ?? "").trim();
-    if (request.length < 3) throw new Error("Describe what you want first.");
+  hostHandle("host:startAgent", async (req: { kind: "create" | "edit"; id?: string; request: string; agent?: AgentId; skillSource?: string }) => {
+    let request = String(req.request ?? "").trim();
+    const skillSource = req.skillSource?.trim();
+    if (!skillSource && request.length < 3) throw new Error("Describe what you want first.");
     const curSettings = settings();
     const agentId = req.agent ?? curSettings.agent;
     const allAgents = await detectAgents(curSettings.customAgents ?? []);
@@ -694,9 +709,31 @@ function installHostIpc() {
       const runtimes = detectRuntimes();
       const hasPython = Boolean(runtimes.find((r) => r.id === "python")?.path);
       const hasSwift = Boolean(runtimes.find((r) => r.id === "swift")?.path);
-      const template = suggestTemplate(request, hasPython, hasSwift);
-      blockId = uniqueId(guessName(request));
-      createBlock({ id: blockId, name: guessName(request), description: request.slice(0, 400), template });
+      if (skillSource) {
+        const imported = await fetchSkillFromLink(skillSource);
+        const template = suggestTemplate(`${imported.name} ${imported.description} ${imported.content}`, hasPython, hasSwift);
+        blockId = uniqueId(imported.name);
+        createBlock({
+          id: blockId,
+          name: imported.name,
+          description: imported.description || request.slice(0, 400),
+          template,
+        });
+        const codeDir = paths.codeDir(blockId);
+        fs.writeFileSync(path.join(codeDir, "SKILL_SOURCE.md"), imported.content, "utf8");
+        if (imported.scripts.length) {
+          const bDir = path.join(codeDir, "backend");
+          fs.mkdirSync(bDir, { recursive: true });
+          for (const sc of imported.scripts) {
+            fs.writeFileSync(path.join(bDir, path.basename(sc.name)), sc.content, "utf8");
+          }
+        }
+        request = `Create an interactive BASS BLOCK SoftwareBlock based on the imported skill "${imported.name}" (saved in SKILL_SOURCE.md${imported.scripts.length ? ` with helper scripts in backend/: ${imported.scripts.map((s) => s.name).join(", ")}` : ""}).\n\nSkill description: ${imported.description}\n${request ? `\nAdditional user instructions:\n${request}\n` : ""}\n--- IMPORTED SKILL CONTENT ---\n${imported.content.slice(0, 18000)}`;
+      } else {
+        const template = suggestTemplate(request, hasPython, hasSwift);
+        blockId = uniqueId(guessName(request));
+        createBlock({ id: blockId, name: guessName(request), description: request.slice(0, 400), template });
+      }
       notifyBlocksChanged();
     }
     if (!blockId || !fs.existsSync(paths.codeDir(blockId))) throw new Error("Block not found");

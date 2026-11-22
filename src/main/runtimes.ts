@@ -1,11 +1,25 @@
 /**
  * Language runtime & compiler detector for BASS BLOCK's Polyglot Engine.
  * Discovers which toolchains (Python, Swift, Rust, C++, Go, Node.js, FFmpeg) are installed
- * on the machine so the AI agent can pick the best available language for any block.
+ * on the machine so the AI agent can pick the best available language for any block,
+ * and provides step-by-step installation instructions for any missing toolchain.
  */
 import fs from "node:fs";
 import path from "node:path";
 import { execFileSync } from "node:child_process";
+
+export interface RuntimeInstallStep {
+  title: string;
+  cmd?: string;
+  note?: string;
+}
+
+export interface RuntimeInstallGuide {
+  summary: string;
+  steps: RuntimeInstallStep[];
+  verifyCmd: string;
+  docsUrl: string;
+}
 
 export interface RuntimeInfo {
   id: "python" | "uv" | "swift" | "rust" | "cpp" | "go" | "node" | "ffmpeg";
@@ -13,24 +27,184 @@ export interface RuntimeInfo {
   bin: string;
   path: string | null;
   version: string | null;
+  install: RuntimeInstallGuide;
 }
 
-const SPECS: { id: RuntimeInfo["id"]; label: string; bins: string[]; versionArg: string }[] = [
-  { id: "python", label: "Python 3", bins: ["python3", "python"], versionArg: "--version" },
-  { id: "uv", label: "uv (Python manager)", bins: ["uv"], versionArg: "--version" },
-  { id: "swift", label: "Swift (swiftc)", bins: ["swiftc"], versionArg: "--version" },
-  { id: "rust", label: "Rust (cargo / rustc)", bins: ["cargo", "rustc"], versionArg: "--version" },
-  { id: "go", label: "Go", bins: ["go"], versionArg: "version" },
-  { id: "cpp", label: "C++ (clang++ / g++)", bins: ["clang++", "g++"], versionArg: "--version" },
-  { id: "node", label: "Node.js", bins: ["node"], versionArg: "--version" },
-  { id: "ffmpeg", label: "FFmpeg (Media)", bins: ["ffmpeg"], versionArg: "-version" },
+const SPECS: {
+  id: RuntimeInfo["id"];
+  label: string;
+  bins: string[];
+  versionArg: string;
+  install: RuntimeInstallGuide;
+}[] = [
+  {
+    id: "python",
+    label: "Python 3",
+    bins: ["python3", "python"],
+    versionArg: "--version",
+    install: {
+      summary: "Required for Python polyglot blocks (data science, CSV/JSON analytics, AI/ML, and media scripting).",
+      steps: [
+        {
+          title: "Option 1 — Install via Homebrew (Recommended)",
+          cmd: "brew install python",
+          note: "Installs the latest Python 3 and pip into /opt/homebrew/bin.",
+        },
+        {
+          title: "Option 2 — Install Apple Command Line Tools",
+          cmd: "xcode-select --install",
+          note: "Includes Apple's bundled python3 along with git, clang++ and swiftc.",
+        },
+      ],
+      verifyCmd: "python3 --version",
+      docsUrl: "https://www.python.org/downloads/macos/",
+    },
+  },
+  {
+    id: "uv",
+    label: "uv (Python manager)",
+    bins: ["uv"],
+    versionArg: "--version",
+    install: {
+      summary: "Ultra-fast Python package and virtual-environment manager for blocks that need third-party PyPI libraries.",
+      steps: [
+        {
+          title: "Option 1 — Official Standalone Installer",
+          cmd: "curl -LsSf https://astral.sh/uv/install.sh | sh",
+          note: "Installs uv into ~/.local/bin/uv without requiring Homebrew.",
+        },
+        {
+          title: "Option 2 — Install via Homebrew",
+          cmd: "brew install uv",
+        },
+      ],
+      verifyCmd: "uv --version",
+      docsUrl: "https://docs.astral.sh/uv/getting-started/installation/",
+    },
+  },
+  {
+    id: "swift",
+    label: "Swift (swiftc)",
+    bins: ["swiftc"],
+    versionArg: "--version",
+    install: {
+      summary: "Compiles native macOS Swift backends for high-speed computation and Apple frameworks (Foundation, CryptoKit, Vision, Metal).",
+      steps: [
+        {
+          title: "Install Apple Xcode Command Line Tools",
+          cmd: "xcode-select --install",
+          note: "A macOS system prompt will appear; click Install and wait for it to finish.",
+        },
+      ],
+      verifyCmd: "swiftc --version",
+      docsUrl: "https://www.swift.org/install/macos/",
+    },
+  },
+  {
+    id: "rust",
+    label: "Rust (cargo / rustc)",
+    bins: ["cargo", "rustc"],
+    versionArg: "--version",
+    install: {
+      summary: "Compiles high-performance native Rust backends and systems tools.",
+      steps: [
+        {
+          title: "Option 1 — Official Rustup Installer (Recommended)",
+          cmd: "curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y",
+          note: "Installs rustc and cargo into ~/.cargo/bin.",
+        },
+        {
+          title: "Option 2 — Install via Homebrew",
+          cmd: "brew install rust",
+        },
+      ],
+      verifyCmd: "cargo --version",
+      docsUrl: "https://www.rust-lang.org/tools/install",
+    },
+  },
+  {
+    id: "go",
+    label: "Go",
+    bins: ["go"],
+    versionArg: "version",
+    install: {
+      summary: "Compiles fast concurrent Go backends and networking utilities.",
+      steps: [
+        {
+          title: "Install Go via Homebrew",
+          cmd: "brew install go",
+          note: "Or download the official macOS .pkg installer from go.dev/dl.",
+        },
+      ],
+      verifyCmd: "go version",
+      docsUrl: "https://go.dev/doc/install",
+    },
+  },
+  {
+    id: "cpp",
+    label: "C++ (clang++ / g++)",
+    bins: ["clang++", "g++"],
+    versionArg: "--version",
+    install: {
+      summary: "Compiles native C++20 backends for simulations, DSP, 3D geometry and heavy algorithms.",
+      steps: [
+        {
+          title: "Install Apple Xcode Command Line Tools",
+          cmd: "xcode-select --install",
+          note: "Provides Apple clang++ and the macOS system SDK headers.",
+        },
+      ],
+      verifyCmd: "clang++ --version",
+      docsUrl: "https://developer.apple.com/xcode/resources/",
+    },
+  },
+  {
+    id: "node",
+    label: "Node.js",
+    bins: ["node"],
+    versionArg: "--version",
+    install: {
+      summary: "Runs JavaScript/TypeScript backend processes and CLI scripts.",
+      steps: [
+        {
+          title: "Option 1 — Install via Homebrew",
+          cmd: "brew install node",
+          note: "Installs node and npm into /opt/homebrew/bin.",
+        },
+        {
+          title: "Option 2 — Download Official macOS Installer",
+          note: "Download the LTS .pkg installer from nodejs.org.",
+        },
+      ],
+      verifyCmd: "node --version",
+      docsUrl: "https://nodejs.org/en/download",
+    },
+  },
+  {
+    id: "ffmpeg",
+    label: "FFmpeg (Media)",
+    bins: ["ffmpeg"],
+    versionArg: "-version",
+    install: {
+      summary: "Enables video editing, audio conversion, waveform extraction, and frame processing in media blocks.",
+      steps: [
+        {
+          title: "Install FFmpeg via Homebrew",
+          cmd: "brew install ffmpeg",
+          note: "Installs ffmpeg and ffprobe with common audio/video codecs.",
+        },
+      ],
+      verifyCmd: "ffmpeg -version",
+      docsUrl: "https://ffmpeg.org/download.html",
+    },
+  },
 ];
 
 let loginPath: string | undefined;
 
 /** Apps started from Finder get a bare PATH; ask the login shell for the real one once. */
-export function userPath(): string {
-  if (loginPath) return loginPath;
+export function userPath(refresh = false): string {
+  if (loginPath && !refresh) return loginPath;
   if (process.platform === "win32") {
     loginPath = process.env.PATH ?? "";
     return loginPath;
@@ -81,6 +255,7 @@ let cachedRuntimes: RuntimeInfo[] | undefined;
 
 export function detectRuntimes(refresh = false): RuntimeInfo[] {
   if (cachedRuntimes && !refresh) return cachedRuntimes;
+  if (refresh) userPath(true);
   const out: RuntimeInfo[] = [];
   for (const spec of SPECS) {
     let foundBin = spec.bins[0];
@@ -104,7 +279,7 @@ export function detectRuntimes(refresh = false): RuntimeInfo[] {
         version = raw.split("\n")[0]?.replace(/^swift-driver version:[^\n]*?(Apple Swift version [^\n(]+).*/, "$1")?.slice(0, 64) || null;
       } catch {}
     }
-    out.push({ id: spec.id, label: spec.label, bin: foundBin, path: foundPath, version });
+    out.push({ id: spec.id, label: spec.label, bin: foundBin, path: foundPath, version, install: spec.install });
   }
   cachedRuntimes = out;
   return out;

@@ -249,10 +249,33 @@ textarea:focus-visible, .input:focus-visible { outline: none; }
 .history-row .h-meta { font-size: 11px; color: var(--text-3); font-family: var(--mono); white-space: nowrap; }
 .runtime-grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 6px; }
 .runtime-item {
-  display: flex; align-items: center; gap: 8px; padding: 7px 10px;
-  border-radius: var(--r-sm); border: 1px solid var(--border); background: var(--bg); font-size: 12px;
+  display: flex; align-items: center; gap: 8px; padding: 8px 10px; width: 100%; text-align: left;
+  border-radius: var(--r-sm); border: 1px solid var(--border); background: var(--bg); font-size: 12px; cursor: pointer;
+  transition: border-color 160ms var(--ease), background-color 160ms var(--ease), transform 120ms var(--ease);
 }
+.runtime-item:hover { border-color: var(--accent); background: var(--surface-2); }
+.runtime-item.missing { border-style: dashed; border-color: var(--border-strong); }
+.runtime-item.missing:hover { border-style: solid; border-color: var(--accent); background: var(--accent-soft); }
 .runtime-item .r-ver { margin-left: auto; font-size: 11px; color: var(--text-3); font-family: var(--mono); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 120px; }
+.runtime-item.missing .r-ver { color: var(--accent); font-weight: 600; font-family: var(--font); }
+
+.install-step {
+  display: flex; flex-direction: column; gap: 6px; padding: 11px 13px;
+  border-radius: var(--r); border: 1px solid var(--border); background: var(--bg);
+}
+.install-step strong { font-size: 12.5px; }
+.cmd-row {
+  display: flex; align-items: center; gap: 8px; padding: 7px 10px;
+  border-radius: var(--r-sm); background: var(--surface-2); border: 1px solid var(--border-strong);
+  font: 12px/1.4 var(--mono); user-select: text;
+}
+.cmd-row code { flex: 1; background: transparent; border: 0; padding: 0; overflow-x: auto; white-space: nowrap; }
+.skill-card {
+  display: flex; flex-direction: column; gap: 6px; padding: 12px 14px;
+  border-radius: var(--r); border: 1px solid var(--accent); background: var(--accent-soft);
+}
+.skill-card strong { font-size: 13.5px; }
+.skill-card p { margin: 0; font-size: 12.5px; color: var(--text-2); }
 
 /* ---------------- buttons ---------------- */
 .btn {

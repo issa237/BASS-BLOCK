@@ -24,7 +24,19 @@ interface AgentInfo {
   custom?: boolean;
   config?: any;
 }
-interface RuntimeInfo { id: string; label: string; bin: string; path: string | null; version: string | null }
+interface RuntimeInfo {
+  id: string;
+  label: string;
+  bin: string;
+  path: string | null;
+  version: string | null;
+  install?: {
+    summary: string;
+    steps: { title: string; cmd?: string; note?: string }[];
+    verifyCmd: string;
+    docsUrl: string;
+  };
+}
 interface HistoryEntry { ref: string; message: string; at: number }
 type AgentEvent =
   | { type: "status" | "text" | "tool" | "log"; text: string }
@@ -594,7 +606,7 @@ const TEMPLATE_INFO: Record<string, [string, string]> = {
 };
 
 function showCreate(prefill = "") {
-  let tab: "ai" | "template" = "ai";
+  let tab: "ai" | "skill" | "template" = "ai";
   let template = "text-tool";
   const prompt = h("textarea", {
     class: "prompt",
@@ -622,32 +634,116 @@ function showCreate(prefill = "") {
     { class: "field" },
     prompt,
     h("div", { class: "examples", style: "justify-content:flex-start" }, ...EXAMPLES.slice(0, 4).map((ex) => h("button", { class: "example", onclick: () => ((prompt.value = ex), prompt.focus()) }, svg(ICONS.sparkle), ex))),
-    noAgent ? h("p", { class: "hint" }, "No coding agent found. Install Claude Code, Gemini CLI or Codex, or start from a template instead.") : null,
+    noAgent ? h("p", { class: "hint" }, "No coding agent found. Link an AI agent or free model in AI Settings, or start from a template.") : null,
   );
+
+  // ---- "From skill" tab ----
+  const skillInput = h("input", {
+    class: "input",
+    style: "flex:1",
+    placeholder: "Paste a skill link (https://github.com/.../SKILL.md) or local SKILL.md path…",
+    value: "",
+  });
+  const skillPreviewBox = h("div", { class: "field" });
+  const skillExtraPrompt = h("textarea", {
+    class: "prompt",
+    style: "min-height:84px",
+    placeholder: "Optional: add specific instructions for how the SoftwareBlock should look or behave (leave blank to generate a complete UI for the skill).",
+  });
+
+  async function loadSkillPreview(source: string) {
+    const src = source.trim();
+    if (!src) return;
+    skillPreviewBox.replaceChildren(h("p", { class: "hint" }, "Fetching skill…"));
+    const info = await attempt(() => host.previewSkill(src));
+    if (!info) {
+      skillPreviewBox.replaceChildren();
+      return;
+    }
+    skillInput.value = info.source || src;
+    skillPreviewBox.replaceChildren(
+      h(
+        "div",
+        { class: "skill-card" },
+        h("div", { class: "row" }, svg(ICONS.sparkle), h("strong", {}, info.name), h("span", { class: "spacer" }), h("span", { class: "chip ok" }, info.scripts?.length ? `${info.scripts.length} script(s)` : "SKILL.md")),
+        h("p", {}, info.description),
+      ),
+    );
+  }
+
+  const skillPane = h(
+    "div",
+    { class: "field", hidden: true },
+    h(
+      "div",
+      { class: "field" },
+      h("label", {}, "Skill Link (GitHub URL / Raw URL) or Local File"),
+      h(
+        "div",
+        { class: "row" },
+        skillInput,
+        h("button", { class: "btn", onclick: () => loadSkillPreview(skillInput.value) }, "Fetch Skill"),
+        h(
+          "button",
+          {
+            class: "btn",
+            onclick: async () => {
+              const info = await attempt(() => host.pickSkillFile());
+              if (info) {
+                skillInput.value = info.source;
+                skillPreviewBox.replaceChildren(
+                  h(
+                    "div",
+                    { class: "skill-card" },
+                    h("div", { class: "row" }, svg(ICONS.sparkle), h("strong", {}, info.name), h("span", { class: "spacer" }), h("span", { class: "chip ok" }, info.scripts?.length ? `${info.scripts.length} script(s)` : "SKILL.md")),
+                    h("p", {}, info.description),
+                  ),
+                );
+              }
+            },
+          },
+          "Browse…",
+        ),
+      ),
+    ),
+    skillPreviewBox,
+    h("div", { class: "field" }, h("label", {}, "Custom Instructions (optional)"), skillExtraPrompt),
+  );
+
   const tplPane = h("div", { class: "field", hidden: true }, h("div", { class: "field" }, h("label", {}, "Name"), nameInput), h("label", { class: "label" }, "Template"), tplGrid);
   const tabs = h("div", { class: "tabs" });
   const go = h("button", { class: "btn primary", onclick: () => submit() }, svg(ICONS.sparkle), "Build block");
   const shortcut = h("span", { class: "kbd" }, "⌘↩ to build");
   const drawTabs = () => {
-    shortcut.textContent = tab === "ai" ? "⌘↩ to build" : "⌘↩ to create";
+    shortcut.textContent = tab === "template" ? "⌘↩ to create" : "⌘↩ to build";
     tabs.replaceChildren(
       h("button", { class: tab === "ai" ? "on" : "", onclick: () => ((tab = "ai"), drawTabs()) }, "Describe it"),
+      h("button", { class: tab === "skill" ? "on" : "", onclick: () => ((tab = "skill"), drawTabs()) }, "From skill"),
       h("button", { class: tab === "template" ? "on" : "", onclick: () => ((tab = "template"), drawTabs()) }, "From template"),
     );
     aiPane.hidden = tab !== "ai";
+    skillPane.hidden = tab !== "skill";
     tplPane.hidden = tab !== "template";
-    sel.hidden = tab !== "ai";
-    go.replaceChildren(...(tab === "ai" ? [svg(ICONS.sparkle), "Build block"] : [svg(ICONS.plus), "Create"]));
+    sel.hidden = tab === "template";
+    go.replaceChildren(
+      ...(tab === "ai"
+        ? [svg(ICONS.sparkle), "Build block"]
+        : tab === "skill"
+          ? [svg(ICONS.sparkle), "Build from skill"]
+          : [svg(ICONS.plus), "Create"]),
+    );
   };
   drawTabs();
 
   const m = modal({
     title: "New block",
     head: [tabs],
-    body: [aiPane, tplPane],
+    body: [aiPane, skillPane, tplPane],
     foot: [shortcut, h("span", { class: "spacer" }), sel, go],
   });
   prompt.addEventListener("keydown", (e) => e.key === "Enter" && e.metaKey && submit());
+  skillInput.addEventListener("keydown", (e) => e.key === "Enter" && (e.metaKey ? submit() : loadSkillPreview(skillInput.value)));
+  skillExtraPrompt.addEventListener("keydown", (e) => e.key === "Enter" && e.metaKey && submit());
   nameInput.addEventListener("keydown", (e) => e.key === "Enter" && (e.metaKey || tab === "template") && submit());
   setTimeout(() => prompt.focus(), 30);
 
@@ -658,6 +754,19 @@ function showCreate(prefill = "") {
       m.close();
       await refreshBlocks();
       openBlock(r.id);
+      return;
+    }
+    if (tab === "skill") {
+      const skillSource = skillInput.value.trim();
+      if (!skillSource) return skillInput.focus();
+      const extra = skillExtraPrompt.value.trim();
+      state.agent = sel.value;
+      host.setSettings({ agent: sel.value });
+      const r = await attempt(() => host.startAgent({ kind: "create", skillSource, request: extra, agent: sel.value }));
+      if (!r) return;
+      state.jobs.set(r.blockId, { jobId: r.jobId, kind: "create", request: `Import skill: ${skillSource}`, events: [] });
+      await refreshBlocks();
+      showProgress(r.blockId);
       return;
     }
     const request = prompt.value.trim();
@@ -843,11 +952,15 @@ async function showSettings() {
     { class: "runtime-grid" },
     ...state.runtimes.map((rt) =>
       h(
-        "div",
-        { class: "runtime-item", title: rt.path ?? "Not found on PATH" },
+        "button",
+        {
+          class: `runtime-item ${rt.path ? "" : "missing"}`,
+          title: rt.path ? `${rt.label} (${rt.path}) — click for details` : `Click to view installation instructions for ${rt.label}`,
+          onclick: () => showRuntimeInstallModal(rt),
+        },
         h("span", { class: `dot ${rt.path ? "" : "err"}` }),
         h("strong", {}, rt.label),
-        h("span", { class: "r-ver" }, rt.version ?? (rt.path ? rt.bin : "Not installed")),
+        h("span", { class: "r-ver" }, rt.path ? (rt.version ?? rt.bin) : "Install →"),
       ),
     ),
   );
@@ -868,7 +981,7 @@ async function showSettings() {
     body: [
       h("p", { class: "hint", style: "margin:0" }, "Choose any installed coding CLI (Claude Code, Gemini CLI, Codex, OpenClaude, OpenCode, Aider, Goose) or link any free/local/cloud model (Ollama, OpenRouter Free, Gemini API, LM Studio, or a custom CLI)."),
       list,
-      h("div", { class: "field" }, h("label", {}, "Detected Polyglot Language Toolchains"), runtimeGrid),
+      h("div", { class: "field" }, h("label", {}, "Detected Polyglot Language Toolchains (click any missing toolchain to install)"), runtimeGrid),
       h(
         "div",
         { class: "field" },
@@ -894,6 +1007,96 @@ async function showSettings() {
       ),
     ],
     foot: [h("span", { class: "hint" }, `BASS BLOCK ${info.version} · ${info.platform}/${info.arch}`), h("span", { class: "spacer" })],
+  });
+}
+
+function copyCmdRow(cmd: string) {
+  return h(
+    "div",
+    { class: "cmd-row" },
+    h("code", {}, cmd),
+    h(
+      "button",
+      {
+        class: "btn small",
+        onclick: () => {
+          navigator.clipboard?.writeText(cmd);
+          toast(`Copied: ${cmd}`);
+        },
+      },
+      svg(ICONS.clipboard),
+      "Copy",
+    ),
+  );
+}
+
+function showRuntimeInstallModal(rt: RuntimeInfo) {
+  const guide = rt.install;
+  const statusBanner = h(
+    "div",
+    { class: "row", style: "padding:10px 12px;border-radius:var(--r-sm);background:var(--surface-2);border:1px solid var(--border)" },
+    h("span", { class: `dot ${rt.path ? "" : "err"}` }),
+    h("strong", {}, rt.path ? `Installed: ${rt.version ?? rt.bin}` : `${rt.label} is not installed yet`),
+    h("span", { class: "spacer" }),
+    rt.path ? h("code", {}, rt.path) : h("span", { class: "chip err" }, "Missing on PATH"),
+  );
+
+  const stepsNodes = (guide?.steps ?? []).map((step, i) =>
+    h(
+      "div",
+      { class: "install-step" },
+      h("strong", {}, `${i + 1}. ${step.title}`),
+      step.cmd ? copyCmdRow(step.cmd) : null,
+      step.note ? h("span", { class: "hint" }, step.note) : null,
+    ),
+  );
+
+  const verifyNode = guide?.verifyCmd
+    ? h(
+        "div",
+        { class: "install-step" },
+        h("strong", {}, "Verify in Terminal"),
+        copyCmdRow(guide.verifyCmd),
+        h("span", { class: "hint" }, "After running the install command in Terminal, click “Re-check Installation” below."),
+      )
+    : null;
+
+  modal({
+    title: h("span", {}, rt.path ? "Toolchain Details — " : "Install ", h("strong", {}, rt.label)),
+    body: nodes(
+      statusBanner,
+      guide?.summary ? h("p", { class: "hint", style: "margin:0" }, guide.summary) : null,
+      ...stepsNodes,
+      verifyNode,
+    ) as Node[],
+    foot: nodes(
+      h("button", { class: "btn ghost", onclick: () => showSettings() }, "← Back to AI Settings"),
+      h("span", { class: "spacer" }),
+      guide?.docsUrl
+        ? h("button", { class: "btn", onclick: () => host.openExternal(guide.docsUrl) }, svg(ICONS.globe), "Official Website ↗")
+        : null,
+      h(
+        "button",
+        {
+          class: "btn primary",
+          onclick: async () => {
+            const updated = (await attempt(() => host.detectRuntimes())) as RuntimeInfo[] | undefined;
+            if (!updated) return;
+            state.runtimes = updated;
+            const found = updated.find((r) => r.id === rt.id);
+            if (found?.path) {
+              toast(`✓ ${found.label} detected (${found.version ?? found.path})`);
+              showSettings();
+            } else {
+              toast(`${rt.label} is still not detected on PATH.`, "err");
+              if (found) showRuntimeInstallModal(found);
+            }
+          },
+        },
+        svg(ICONS.reload),
+        "Re-check Installation",
+      ),
+    ) as Node[],
   });
 }
 
