@@ -1,6 +1,9 @@
 /**
- * Drives installed coding-agent CLIs (Claude Code, Gemini CLI, Codex) in headless mode to
- * create or modify a block. The host owns the loop: snapshot → agent → validate → repair (max 3).
+ * Universal AI Agent & Model Connector for BASS BLOCK.
+ * Supports:
+ * 1. Built-in CLI Coding Agents (Claude Code, Gemini CLI, Codex, OpenClaude, OpenCode, Aider, Goose, Qwen Code)
+ * 2. User-linked Custom CLI Agents (any binary, wrapper or script with custom args & env vars)
+ * 3. Direct Free/Local/Cloud API Models (Ollama local models, OpenRouter free tier, Gemini API, LM Studio, or any OpenAI-compatible URL)
  */
 import fs from "node:fs";
 import path from "node:path";
@@ -8,13 +11,51 @@ import crypto from "node:crypto";
 import { spawn, type ChildProcess } from "node:child_process";
 import { history, type Problem } from "../shared/blocks";
 import { paths, SKILL_PATH, TEMPLATES_DIR } from "../shared/paths";
+import { detectOllamaModels, runDirectApiStep, type DirectApiConfig } from "./directAgent";
 import { findBinary, formatRuntimesForPrompt, userPath } from "./runtimes";
 
-export type AgentId = "claude" | "gemini" | "codex";
-export const AGENTS: { id: AgentId; label: string; bin: string }[] = [
-  { id: "claude", label: "Claude Code", bin: "claude" },
-  { id: "gemini", label: "Gemini CLI", bin: "gemini" },
-  { id: "codex", label: "Codex", bin: "codex" },
+export type BuiltinAgentId = "claude" | "gemini" | "codex" | "openclaude" | "opencode" | "aider" | "goose" | "qwen";
+export type AgentId = string;
+
+export interface CustomCliAgent {
+  id: string;
+  label: string;
+  kind: "cli";
+  command: string;
+  argsTemplate?: string;
+  env?: Record<string, string>;
+}
+
+export interface CustomApiAgent {
+  id: string;
+  label: string;
+  kind: "api";
+  baseUrl: string;
+  model: string;
+  apiKey?: string;
+}
+
+export type CustomAgentConfig = CustomCliAgent | CustomApiAgent;
+
+export interface AgentDescriptor {
+  id: string;
+  label: string;
+  kind: "builtin-cli" | "custom-cli" | "ollama" | "custom-api";
+  path: string | null;
+  detail?: string;
+  custom?: boolean;
+  config?: CustomAgentConfig;
+}
+
+export const BUILTIN_AGENTS: { id: BuiltinAgentId; label: string; bins: string[]; hint?: string }[] = [
+  { id: "claude", label: "Claude Code", bins: ["claude"] },
+  { id: "gemini", label: "Gemini CLI", bins: ["gemini"], hint: "Includes free tier" },
+  { id: "codex", label: "Codex", bins: ["codex"] },
+  { id: "openclaude", label: "OpenClaude", bins: ["openclaude", "open-claude"], hint: "Free / open-source CLI" },
+  { id: "opencode", label: "OpenCode", bins: ["opencode"], hint: "Free / open-source CLI" },
+  { id: "aider", label: "Aider", bins: ["aider"], hint: "Works with Ollama & free APIs" },
+  { id: "goose", label: "Goose", bins: ["goose"], hint: "Open-source coding agent" },
+  { id: "qwen", label: "Qwen Code", bins: ["qwen"], hint: "Open-source coding CLI" },
 ];
 
 export type AgentEvent =
@@ -24,27 +65,97 @@ export type AgentEvent =
   | { type: "log"; text: string }
   | { type: "done"; ok: boolean; problems: Problem[]; summary?: string; cancelled?: boolean };
 
-export function detectAgents(): { id: AgentId; label: string; path: string | null }[] {
-  return AGENTS.map((a) => ({
-    id: a.id,
-    label: a.label,
-    path: findBinary(a.bin),
+function resolveCommandPath(cmd: string): string | null {
+  const trimmed = cmd.trim();
+  if (!trimmed) return null;
+  if (trimmed.includes("/") || trimmed.includes("\\")) {
+    try {
+      fs.accessSync(trimmed, fs.constants.X_OK);
+      return trimmed;
+    } catch {
+      return null;
+    }
+  }
+  return findBinary(trimmed);
+}
+
+export async function detectAgents(customAgents: CustomAgentConfig[] = []): Promise<AgentDescriptor[]> {
+  const builtins: AgentDescriptor[] = BUILTIN_AGENTS.map((a) => {
+    let found: string | null = null;
+    for (const b of a.bins) {
+      found = findBinary(b);
+      if (found) break;
+    }
+    return {
+      id: a.id,
+      label: a.label,
+      kind: "builtin-cli",
+      path: found,
+      detail: found ?? (a.hint ? `Not installed · ${a.hint}` : "Not installed"),
+    };
+  });
+
+  const customList: AgentDescriptor[] = customAgents.map((c) => {
+    if (c.kind === "cli") {
+      const binPath = resolveCommandPath(c.command);
+      return {
+        id: c.id,
+        label: c.label,
+        kind: "custom-cli",
+        path: binPath,
+        detail: binPath ? `${binPath}${c.argsTemplate ? ` ${c.argsTemplate}` : ""}` : `Command not found: ${c.command}`,
+        custom: true,
+        config: c,
+      };
+    }
+    return {
+      id: c.id,
+      label: c.label,
+      kind: "custom-api",
+      path: c.baseUrl,
+      detail: `${c.model} · ${c.baseUrl}`,
+      custom: true,
+      config: c,
+    };
+  });
+
+  const ollamaModels = await detectOllamaModels();
+  const ollamaList: AgentDescriptor[] = ollamaModels.map((m) => ({
+    id: m.id,
+    label: m.label,
+    kind: "ollama",
+    path: m.baseUrl,
+    detail: `${m.model} · ${m.baseUrl}`,
+    config: { id: m.id, label: m.label, kind: "api", baseUrl: m.baseUrl, model: m.model },
   }));
+
+  return [...customList, ...ollamaList, ...builtins];
 }
 
 /**
- * A minimal environment: no host secrets. Each agent only gets its own vendor's variables,
- * and PATH has the bassblock CLI shim first.
+ * A minimal environment: no host secrets. Each agent only gets its own vendor's variables
+ * (plus any user-configured env vars for custom CLI agents), and PATH has the bassblock CLI shim first.
  */
-function agentEnv(agent: AgentId): NodeJS.ProcessEnv {
+function agentEnv(agentId: string, customEnv?: Record<string, string>): NodeJS.ProcessEnv {
   const keep = ["HOME", "USER", "LOGNAME", "SHELL", "LANG", "LC_ALL", "TMPDIR", "TEMP", "TMP", "TERM", "__CF_USER_TEXT_ENCODING"];
-  const vendor: Record<AgentId, RegExp> = {
+  const vendor: Record<string, RegExp> = {
     claude: /^(ANTHROPIC_|CLAUDE_CODE_|CLAUDE_CONFIG_DIR$|AWS_|CLOUD_ML_REGION$|GOOGLE_APPLICATION_CREDENTIALS$|VERTEX_)/,
+    openclaude: /^(ANTHROPIC_|OPENAI_|OPENCLAUDE_|CLAUDE_|OLLAMA_|OPENROUTER_)/,
+    opencode: /^(ANTHROPIC_|OPENAI_|OPENCODE_|GEMINI_|GOOGLE_|OLLAMA_|OPENROUTER_)/,
+    aider: /^(AIDER_|OPENAI_|ANTHROPIC_|GEMINI_|OLLAMA_|OPENROUTER_|DEEPSEEK_|GROQ_)/,
+    goose: /^(GOOSE_|OPENAI_|ANTHROPIC_|GEMINI_|OLLAMA_|OPENROUTER_)/,
     gemini: /^(GEMINI_|GOOGLE_)/,
     codex: /^(OPENAI_|CODEX_)/,
+    qwen: /^(QWEN_|OPENAI_|DASHSCOPE_)/,
   };
+  const re = vendor[agentId] ?? /^(ANTHROPIC_|OPENAI_|GEMINI_|GOOGLE_|OLLAMA_|OPENROUTER_|DEEPSEEK_|GROQ_|CLAUDE_|CODEX_)/;
   const env: NodeJS.ProcessEnv = {};
-  for (const [k, v] of Object.entries(process.env)) if (keep.includes(k) || vendor[agent].test(k)) env[k] = v;
+  for (const [k, v] of Object.entries(process.env)) if (keep.includes(k) || re.test(k)) env[k] = v;
+  if (customEnv) {
+    for (const [k, v] of Object.entries(customEnv)) {
+      if (k.trim() && v !== undefined) env[k.trim()] = v;
+    }
+  }
   env.PATH = `${paths.binDir()}${path.delimiter}${userPath()}`;
   if (process.env.BASSBLOCK_HOME) env.BASSBLOCK_HOME = process.env.BASSBLOCK_HOME;
   env.NO_COLOR = "1";
@@ -52,7 +163,7 @@ function agentEnv(agent: AgentId): NodeJS.ProcessEnv {
   return env;
 }
 
-function skillText(): string {
+export function skillText(): string {
   return fs.readFileSync(SKILL_PATH, "utf8").replace(/^---[\s\S]*?---\s*/, "");
 }
 
@@ -98,9 +209,49 @@ ${request}
 Fix the problems, then run \`bassblock validate\` again until it passes. Finish with a one sentence summary of the fix.`;
 }
 
-function agentArgs(agent: AgentId, prompt: string, codeDir: string): string[] {
-  switch (agent) {
+function splitArgsTemplate(tpl: string): string[] {
+  const out: string[] = [];
+  const re = /"([^"]*)"|'([^']*)'|(\S+)/g;
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(tpl)) !== null) {
+    out.push(m[1] ?? m[2] ?? m[3]);
+  }
+  return out;
+}
+
+function buildCliArgs(
+  agent: AgentDescriptor,
+  prompt: string,
+  codeDir: string,
+  promptFile: string,
+): string[] {
+  const fullPrompt = `${skillText()}\n\n---\n\n${prompt}`;
+  fs.mkdirSync(path.dirname(promptFile), { recursive: true });
+  fs.writeFileSync(promptFile, fullPrompt, "utf8");
+
+  if (agent.kind === "custom-cli" && agent.config?.kind === "cli" && agent.config.argsTemplate?.trim()) {
+    const tokens = splitArgsTemplate(agent.config.argsTemplate.trim());
+    const hasPlaceholder = tokens.some((t) => /\{\{(prompt|full_prompt|prompt_file)\}\}/.test(t));
+    const replaced = tokens.map((t) =>
+      t
+        .replace(/\{\{full_prompt\}\}/g, fullPrompt)
+        .replace(/\{\{prompt\}\}/g, fullPrompt)
+        .replace(/\{\{short_prompt\}\}/g, prompt)
+        .replace(/\{\{prompt_file\}\}/g, promptFile)
+        .replace(/\{\{skill_file\}\}/g, SKILL_PATH)
+        .replace(/\{\{code_dir\}\}/g, codeDir),
+    );
+    if (!hasPlaceholder) replaced.push(fullPrompt);
+    return replaced;
+  }
+
+  const baseName = path.basename(agent.path ?? agent.id).replace(/\.(cmd|exe|sh)$/i, "").toLowerCase();
+  const id = agent.kind === "builtin-cli" ? agent.id : baseName;
+
+  switch (id) {
     case "claude":
+    case "openclaude":
+    case "open-claude":
       return [
         "-p", prompt,
         "--output-format", "stream-json", "--verbose",
@@ -111,8 +262,9 @@ function agentArgs(agent: AgentId, prompt: string, codeDir: string): string[] {
         "--append-system-prompt", skillText(),
       ];
     case "gemini":
+    case "qwen":
       return [
-        "-p", `${skillText()}\n\n---\n\n${prompt}`,
+        "-p", fullPrompt,
         "--approval-mode", "auto_edit",
         "--allowed-tools", "run_shell_command(bassblock validate)",
         "--include-directories", TEMPLATES_DIR,
@@ -120,7 +272,15 @@ function agentArgs(agent: AgentId, prompt: string, codeDir: string): string[] {
         "-o", "stream-json",
       ];
     case "codex":
-      return ["exec", "--sandbox", "workspace-write", "--skip-git-repo-check", "--json", "--cd", codeDir, `${skillText()}\n\n---\n\n${prompt}`];
+      return ["exec", "--sandbox", "workspace-write", "--skip-git-repo-check", "--json", "--cd", codeDir, fullPrompt];
+    case "opencode":
+      return ["run", fullPrompt];
+    case "aider":
+      return ["--yes-always", "--no-auto-commits", "--no-git", "--message-file", promptFile];
+    case "goose":
+      return ["run", "--text", fullPrompt];
+    default:
+      return ["-p", fullPrompt];
   }
 }
 
@@ -153,7 +313,7 @@ function parseLine(line: string): AgentEvent | null {
   } catch {
     return { type: "log", text: trimmed.slice(0, 500) };
   }
-  // Claude Code stream-json
+  // Claude Code / OpenClaude stream-json
   if (o.type === "assistant" && o.message?.content) {
     const parts = o.message.content as any[];
     const tool = parts.find((c) => c.type === "tool_use");
@@ -194,8 +354,7 @@ export interface AgentJob {
 }
 
 export function runAgentJob(opts: {
-  agent: AgentId;
-  agentPath: string;
+  agent: AgentDescriptor;
   blockId: string;
   kind: "create" | "edit";
   request: string;
@@ -204,10 +363,13 @@ export function runAgentJob(opts: {
   maxRepairs?: number;
 }): AgentJob {
   const codeDir = paths.codeDir(opts.blockId);
-  const transcript = path.join(paths.metaDir(opts.blockId), `agent-${Date.now()}.log`);
-  fs.mkdirSync(path.dirname(transcript), { recursive: true });
+  const metaDir = paths.metaDir(opts.blockId);
+  const transcript = path.join(metaDir, `agent-${Date.now()}.log`);
+  const promptFile = path.join(metaDir, "last-prompt.txt");
+  fs.mkdirSync(metaDir, { recursive: true });
   const log = fs.createWriteStream(transcript);
   let child: ChildProcess | null = null;
+  let abortCtrl: AbortController | null = null;
   let cancelled = false;
   let lastStderr = "";
   const emit = (e: AgentEvent) => {
@@ -215,12 +377,35 @@ export function runAgentJob(opts: {
     opts.onEvent(e);
   };
 
-  const runOnce = (prompt: string) =>
-    new Promise<number>((resolve) => {
+  const runOnce = (prompt: string) => {
+    if (opts.agent.kind === "ollama" || opts.agent.kind === "custom-api") {
+      const apiCfg = opts.agent.config as CustomApiAgent;
+      const directCfg: DirectApiConfig = {
+        id: opts.agent.id,
+        label: opts.agent.label,
+        baseUrl: apiCfg.baseUrl,
+        model: apiCfg.model,
+        apiKey: apiCfg.apiKey,
+      };
+      abortCtrl = new AbortController();
+      return runDirectApiStep({
+        config: directCfg,
+        blockId: opts.blockId,
+        codeDir,
+        skillText: skillText(),
+        prompt,
+        signal: abortCtrl.signal,
+        onEvent: (ev) => emit(ev),
+      });
+    }
+
+    return new Promise<number>((resolve) => {
       lastStderr = "";
-      child = spawn(opts.agentPath, agentArgs(opts.agent, prompt, codeDir), {
+      const customEnv = opts.agent.config?.kind === "cli" ? opts.agent.config.env : undefined;
+      const args = buildCliArgs(opts.agent, prompt, codeDir, promptFile);
+      child = spawn(opts.agent.path!, args, {
         cwd: codeDir,
-        env: agentEnv(opts.agent),
+        env: agentEnv(opts.agent.id, customEnv),
         stdio: ["ignore", "pipe", "pipe"],
         detached: process.platform !== "win32",
       });
@@ -245,7 +430,7 @@ export function runAgentJob(opts: {
         }
       });
       child.on("error", (err) => {
-        emit({ type: "log", text: `Could not start ${opts.agent}: ${err.message}` });
+        emit({ type: "log", text: `Could not start ${opts.agent.label}: ${err.message}` });
         resolve(-1);
       });
       child.on("close", (code) => {
@@ -257,6 +442,7 @@ export function runAgentJob(opts: {
         resolve(code ?? -1);
       });
     });
+  };
 
   const done = (async () => {
     const initialHash = dirContentHash(codeDir);
@@ -265,12 +451,12 @@ export function runAgentJob(opts: {
     const maxRepairs = opts.maxRepairs ?? 3;
     let result: { ok: boolean; problems: Problem[] } = { ok: false, problems: [] };
     try {
-      emit({ type: "status", text: opts.kind === "create" ? "Building your block…" : "Applying your change…" });
+      emit({ type: "status", text: opts.kind === "create" ? `Building with ${opts.agent.label}…` : `Applying change with ${opts.agent.label}…` });
       let code = await runOnce(buildPrompt(opts.kind, opts.blockId, opts.request));
       for (let attempt = 0; !cancelled; attempt++) {
         const changed = dirContentHash(codeDir) !== initialHash;
         if (code !== 0 && !changed) {
-          const errMsg = lastStderr.split("\n").filter(Boolean).slice(-3).join(" — ") || `Agent CLI exited with code ${code} before making any changes.`;
+          const errMsg = lastStderr.split("\n").filter(Boolean).slice(-3).join(" — ") || `${opts.agent.label} exited with code ${code} before making any changes.`;
           result = { ok: false, problems: [{ step: "runtime", message: errMsg }] };
           emit({ type: "log", text: `Agent failed: ${errMsg}` });
           break;
@@ -302,6 +488,7 @@ export function runAgentJob(opts: {
   return {
     cancel() {
       cancelled = true;
+      abortCtrl?.abort();
       const c = child as ChildProcess | null;
       if (c?.pid) {
         try {

@@ -481,12 +481,12 @@ textarea.prompt::placeholder { color: var(--text-3); }
 .problems li + li { margin-top: 4px; }
 .agent-opt {
   display: flex; align-items: center; gap: 12px; padding: 11px 13px; border-radius: var(--r);
-  border: 1px solid var(--border-strong); background: var(--bg); text-align: left; width: 100%;
+  border: 1px solid var(--border-strong); background: var(--bg); text-align: left; width: 100%; cursor: pointer;
   transition: border-color 160ms var(--ease), box-shadow 160ms var(--ease), background-color 160ms var(--ease);
 }
-.agent-opt:hover:not(:disabled) { border-color: var(--text-3); }
+.agent-opt:hover:not(:disabled):not(.disabled) { border-color: var(--text-3); }
 .agent-opt.on { border-color: var(--accent); box-shadow: 0 0 0 4px var(--accent-soft); background: var(--accent-soft); }
-.agent-opt:disabled { opacity: 0.5; }
+.agent-opt:disabled, .agent-opt.disabled { opacity: 0.5; cursor: default; }
 .agent-opt .meta { color: var(--text-3); font-size: 11.5px; font-family: var(--mono); }
 .agent-opt .radio { width: 16px; height: 16px; border-radius: 50%; border: 1.5px solid var(--border-strong); flex: none; display: grid; place-items: center; }
 .agent-opt.on .radio { border-color: var(--accent); }

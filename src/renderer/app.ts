@@ -15,7 +15,15 @@ interface BlockItem {
   building: boolean;
   thumb: string | null;
 }
-interface AgentInfo { id: string; label: string; path: string | null }
+interface AgentInfo {
+  id: string;
+  label: string;
+  kind?: string;
+  path: string | null;
+  detail?: string;
+  custom?: boolean;
+  config?: any;
+}
 interface RuntimeInfo { id: string; label: string; bin: string; path: string | null; version: string | null }
 interface HistoryEntry { ref: string; message: string; at: number }
 type AgentEvent =
@@ -787,12 +795,12 @@ async function showSettings() {
     list.replaceChildren(
       ...state.agents.map((a) =>
         h(
-          "button",
+          "div",
           {
-            class: `agent-opt ${state.agent === a.id ? "on" : ""}`,
+            class: `agent-opt ${state.agent === a.id ? "on" : ""} ${!a.path ? "disabled" : ""}`,
             role: "radio",
+            tabIndex: a.path ? 0 : -1,
             "aria-checked": String(state.agent === a.id),
-            disabled: !a.path,
             onclick: async () => {
               if (!a.path) return;
               state.agent = a.id;
@@ -802,8 +810,29 @@ async function showSettings() {
             },
           },
           h("span", { class: "radio", "aria-hidden": "true" }),
-          h("div", { class: "field", style: "gap:1px;flex:1" }, h("strong", {}, a.label), h("span", { class: "meta" }, a.path ?? "Not installed")),
-          a.path ? h("span", { class: "chip ok" }, state.agent === a.id ? "Default" : "Installed") : h("span", { class: "chip" }, "Not found"),
+          h("div", { class: "field", style: "gap:1px;flex:1;min-width:0" }, h("strong", {}, a.label), h("span", { class: "meta", style: "overflow:hidden;text-overflow:ellipsis;white-space:nowrap" }, a.detail ?? a.path ?? "Not installed")),
+          a.path ? h("span", { class: "chip ok" }, state.agent === a.id ? "Default" : a.kind === "ollama" ? "Local Free" : a.custom ? "Linked" : "Installed") : h("span", { class: "chip" }, "Not found"),
+          a.custom
+            ? h(
+                "button",
+                {
+                  class: "btn ghost small icon-btn",
+                  title: `Remove ${a.label}`,
+                  onclick: async (e: Event) => {
+                    e.stopPropagation();
+                    const res = await attempt(() => host.deleteCustomAgent(a.id));
+                    if (res) {
+                      state.agents = res.agents;
+                      state.agent = res.settings.agent;
+                      draw();
+                      renderSidebar();
+                      toast(`Removed ${a.label}`);
+                    }
+                  },
+                },
+                svg(ICONS.close),
+              )
+            : null,
         ),
       ),
     );
@@ -825,8 +854,19 @@ async function showSettings() {
 
   modal({
     title: "AI & Polyglot Runtime Settings",
+    head: [
+      h(
+        "button",
+        {
+          class: "btn primary small",
+          onclick: () => showLinkAgent(),
+        },
+        svg(ICONS.plus),
+        "Link AI Agent / Free Model",
+      ),
+    ],
     body: [
-      h("p", { class: "hint", style: "margin:0" }, "BASS BLOCK uses your installed coding agent and gives it the full list of detected language compilers so it can build blocks in Web/JS/TS, Python, Swift, Rust, C++, Go or Node.js."),
+      h("p", { class: "hint", style: "margin:0" }, "Choose any installed coding CLI (Claude Code, Gemini CLI, Codex, OpenClaude, OpenCode, Aider, Goose) or link any free/local/cloud model (Ollama, OpenRouter Free, Gemini API, LM Studio, or a custom CLI)."),
       list,
       h("div", { class: "field" }, h("label", {}, "Detected Polyglot Language Toolchains"), runtimeGrid),
       h(
@@ -854,6 +894,170 @@ async function showSettings() {
       ),
     ],
     foot: [h("span", { class: "hint" }, `BASS BLOCK ${info.version} · ${info.platform}/${info.arch}`), h("span", { class: "spacer" })],
+  });
+}
+
+function showLinkAgent() {
+  let tab: "cli" | "api" = "cli";
+  const cliName = h("input", { class: "input", placeholder: "e.g. OpenClaude (Free)", value: "OpenClaude (Free)" });
+  const cliCmd = h("input", { class: "input", placeholder: "Binary name or path (e.g. openclaude, claude, opencode, aider)", value: "openclaude" });
+  const cliArgs = h("input", { class: "input", placeholder: "Optional args template (leave blank for default, or e.g. -p {{prompt}})", value: "" });
+  const cliEnv = h("textarea", {
+    class: "prompt",
+    style: "min-height:76px;font-family:var(--mono);font-size:12px",
+    placeholder: "Optional ENV variables (KEY=VALUE, one per line):\ne.g. ANTHROPIC_BASE_URL=http://127.0.0.1:11434\nANTHROPIC_AUTH_TOKEN=ollama",
+  });
+
+  const apiName = h("input", { class: "input", placeholder: "e.g. Ollama Local (Qwen Coder)", value: "Ollama · Qwen 2.5 Coder (Free)" });
+  const apiUrl = h("input", { class: "input", placeholder: "OpenAI-compatible Base URL (e.g. http://127.0.0.1:11434/v1)", value: "http://127.0.0.1:11434/v1" });
+  const apiModel = h("input", { class: "input", placeholder: "Model ID (e.g. qwen2.5-coder:7b)", value: "qwen2.5-coder:7b" });
+  const apiKey = h("input", { class: "input", type: "password", placeholder: "Optional for local Ollama/LM Studio; required for OpenRouter/Gemini", value: "" });
+
+  const CLI_PRESETS: [string, string, string, string, string][] = [
+    ["OpenClaude CLI", "OpenClaude", "openclaude", "", ""],
+    ["Claude CLI + Local Ollama (Free)", "Claude + Ollama (Free)", "claude", "", "ANTHROPIC_BASE_URL=http://127.0.0.1:11434\nANTHROPIC_AUTH_TOKEN=ollama"],
+    ["OpenCode CLI", "OpenCode", "opencode", "run {{prompt}}", ""],
+    ["Aider + Local Ollama (Free)", "Aider + Ollama (Free)", "aider", "--model ollama_chat/qwen2.5-coder:7b --yes-always --no-git --message-file {{prompt_file}}", ""],
+  ];
+
+  const API_PRESETS: [string, string, string, string][] = [
+    ["Ollama (Local Free)", "Ollama · Qwen 2.5 Coder (Free)", "http://127.0.0.1:11434/v1", "qwen2.5-coder:7b"],
+    ["OpenRouter (Free Cloud)", "OpenRouter Free (Qwen Coder)", "https://openrouter.ai/api/v1", "qwen/qwen3-coder:free"],
+    ["Gemini API (Free Tier)", "Google Gemini 2.5 Flash", "https://generativelanguage.googleapis.com/v1beta/openai", "gemini-2.5-flash"],
+    ["LM Studio (Local Free)", "LM Studio Local Model", "http://127.0.0.1:1234/v1", "local-model"],
+  ];
+
+  const cliPane = h(
+    "div",
+    { class: "field" },
+    h(
+      "div",
+      { class: "examples", style: "justify-content:flex-start;margin-top:0" },
+      ...CLI_PRESETS.map(([btnLabel, name, cmd, args, envStr]) =>
+        h(
+          "button",
+          {
+            class: "example",
+            onclick: () => {
+              cliName.value = name;
+              cliCmd.value = cmd;
+              cliArgs.value = args;
+              cliEnv.value = envStr;
+            },
+          },
+          svg(ICONS.terminal),
+          btnLabel,
+        ),
+      ),
+    ),
+    h("div", { class: "field" }, h("label", {}, "Display Name"), cliName),
+    h("div", { class: "field" }, h("label", {}, "CLI Command or Binary Path"), cliCmd),
+    h("div", { class: "field" }, h("label", {}, "Arguments Template (optional — placeholders: {{prompt}}, {{prompt_file}}, {{code_dir}})"), cliArgs),
+    h("div", { class: "field" }, h("label", {}, "Custom Environment Variables (optional — e.g. point OpenClaude/Claude at a free endpoint)"), cliEnv),
+  );
+
+  const apiPane = h(
+    "div",
+    { class: "field", hidden: true },
+    h(
+      "div",
+      { class: "examples", style: "justify-content:flex-start;margin-top:0" },
+      ...API_PRESETS.map(([btnLabel, name, url, model]) =>
+        h(
+          "button",
+          {
+            class: "example",
+            onclick: () => {
+              apiName.value = name;
+              apiUrl.value = url;
+              apiModel.value = model;
+            },
+          },
+          svg(ICONS.sparkle),
+          btnLabel,
+        ),
+      ),
+    ),
+    h("div", { class: "field" }, h("label", {}, "Display Name"), apiName),
+    h("div", { class: "field" }, h("label", {}, "OpenAI-Compatible Base URL"), apiUrl),
+    h("div", { class: "field" }, h("label", {}, "Model ID"), apiModel),
+    h("div", { class: "field" }, h("label", {}, "API Key (leave empty for local Ollama / LM Studio)"), apiKey),
+  );
+
+  const tabs = h("div", { class: "tabs" });
+  const drawTabs = () => {
+    tabs.replaceChildren(
+      h("button", { class: tab === "cli" ? "on" : "", onclick: () => ((tab = "cli"), drawTabs()) }, "Link CLI Agent (OpenClaude, etc.)"),
+      h("button", { class: tab === "api" ? "on" : "", onclick: () => ((tab = "api"), drawTabs()) }, "Link Free / Local Model API"),
+    );
+    cliPane.hidden = tab !== "cli";
+    apiPane.hidden = tab !== "api";
+  };
+  drawTabs();
+
+  function buildPayload() {
+    if (tab === "cli") {
+      const env: Record<string, string> = {};
+      for (const line of cliEnv.value.split("\n")) {
+        const eq = line.indexOf("=");
+        if (eq > 0) env[line.slice(0, eq).trim()] = line.slice(eq + 1).trim();
+      }
+      return {
+        kind: "cli",
+        label: cliName.value.trim(),
+        command: cliCmd.value.trim(),
+        argsTemplate: cliArgs.value.trim() || undefined,
+        env: Object.keys(env).length ? env : undefined,
+      };
+    }
+    return {
+      kind: "api",
+      label: apiName.value.trim(),
+      baseUrl: apiUrl.value.trim(),
+      model: apiModel.value.trim(),
+      apiKey: apiKey.value.trim() || undefined,
+    };
+  }
+
+  const testBtn = h(
+    "button",
+    {
+      class: "btn",
+      onclick: async () => {
+        const res = await attempt(() => host.testAgent(buildPayload()));
+        if (res) toast(res.message, res.ok ? "info" : "err");
+      },
+    },
+    "Test Connection",
+  );
+  const saveBtn = h(
+    "button",
+    {
+      class: "btn primary",
+      onclick: async () => {
+        const res = await attempt(() => host.saveCustomAgent(buildPayload()));
+        if (!res) return;
+        state.agents = res.agents;
+        state.agent = res.settings.agent;
+        renderSidebar();
+        toast(`Linked ${buildPayload().label}`);
+        showSettings();
+      },
+    },
+    svg(ICONS.check),
+    "Save & Link Agent",
+  );
+
+  modal({
+    title: "Link AI Agent or Free Model",
+    head: [tabs],
+    body: [cliPane, apiPane],
+    foot: [
+      h("button", { class: "btn ghost", onclick: () => showSettings() }, "← Back to AI Settings"),
+      h("span", { class: "spacer" }),
+      testBtn,
+      saveBtn,
+    ],
   });
 }
 

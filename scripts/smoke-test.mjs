@@ -119,6 +119,84 @@ await build({ entryPoints: [path.join(root, "src/shared/paths.ts")], bundle: tru
 const { safeJoin } = require(plib);
 check("safeJoin blocks traversal", safeJoin("/a/b", "../../etc/passwd") === null && safeJoin("/a/b", "x/y") === "/a/b/x/y");
 
+// 8. Universal AI Agents: Custom CLI agent (OpenClaude style) + Built-in Direct API runner (Ollama / OpenRouter style)
+const alib = path.join(root, "dist/test-agent.cjs");
+await build({ entryPoints: [path.join(root, "src/main/agent.ts")], bundle: true, platform: "node", format: "cjs", outfile: alib, logLevel: "silent" });
+const { detectAgents, runAgentJob } = require(alib);
+
+// 8a. Custom CLI agent test
+const mockCli = path.join(home, "mock-openclaude.sh");
+fs.writeFileSync(
+  mockCli,
+  '#!/bin/sh\ncat > main.js <<\'EOF\'\ndocument.getElementById("title").textContent = "Built by OpenClaude CLI";\nbb.ready();\nEOF\necho \'{"type":"result","result":"Updated block via custom CLI"}\'\n',
+  { mode: 0o755 },
+);
+const customCliCfg = { id: "custom-openclaude", label: "OpenClaude Free", kind: "cli", command: mockCli, argsTemplate: "--prompt-file {{prompt_file}}" };
+const detected = await detectAgents([customCliCfg]);
+const cliDesc = detected.find((a) => a.id === "custom-openclaude");
+check("detects custom linked CLI agent", Boolean(cliDesc && cliDesc.path === mockCli));
+
+const cliJob = runAgentJob({
+  agent: cliDesc,
+  blockId: "s-blank",
+  kind: "edit",
+  request: "Update title with OpenClaude",
+  validate: async () => ({ ok: true, problems: [] }),
+  onEvent: () => {},
+});
+const cliRes = await cliJob.done;
+check(
+  "custom CLI agent edits block and passes validation",
+  cliRes.ok && fs.readFileSync(path.join(home, "blocks/s-blank/code/main.js"), "utf8").includes("Built by OpenClaude CLI"),
+);
+
+// 8b. Built-in Direct API agent test (local OpenAI-compatible server)
+const http = require("node:http");
+const srv = http.createServer((req, res) => {
+  let body = "";
+  req.on("data", (c) => (body += c));
+  req.on("end", () => {
+    res.writeHead(200, { "Content-Type": "application/json" });
+    res.end(
+      JSON.stringify({
+        choices: [
+          {
+            message: {
+              content:
+                '<<<FILE: main.js>>>\ndocument.getElementById("title").textContent = "Built by Free API Model";\nbb.ready();\n<<<END_FILE>>>\n<<<SUMMARY>>>\nUpdated via Direct API.\n<<<END_SUMMARY>>>',
+            },
+          },
+        ],
+      }),
+    );
+  });
+});
+await new Promise((r) => srv.listen(0, "127.0.0.1", r));
+const apiPort = srv.address().port;
+const apiCfg = {
+  id: "custom-free-api",
+  label: "Local Free Model",
+  kind: "api",
+  baseUrl: `http://127.0.0.1:${apiPort}/v1`,
+  model: "qwen2.5-coder:free",
+};
+const apiDesc = (await detectAgents([apiCfg])).find((a) => a.id === "custom-free-api");
+const apiJob = runAgentJob({
+  agent: apiDesc,
+  blockId: "s-blank",
+  kind: "edit",
+  request: "Update title with Free API model",
+  validate: async () => ({ ok: true, problems: [] }),
+  onEvent: () => {},
+});
+const apiRes = await apiJob.done;
+srv.close();
+check(
+  "direct API agent writes block files and passes validation",
+  apiRes.ok && fs.readFileSync(path.join(home, "blocks/s-blank/code/main.js"), "utf8").includes("Built by Free API Model"),
+);
+
+fs.rmSync(alib, { force: true });
 fs.rmSync(home, { recursive: true, force: true });
 console.log(failed ? `\n${failed} check(s) failed` : "\nAll checks passed");
 process.exit(failed ? 1 : 0);

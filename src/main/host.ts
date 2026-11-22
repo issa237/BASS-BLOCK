@@ -31,9 +31,10 @@ import {
   type TemplateName,
 } from "../shared/blocks";
 import { APP_ROOT, IS_PACKAGED, SKILL_PATH, bbHome, paths } from "../shared/paths";
-import { detectAgents, runAgentJob, type AgentId, type AgentJob } from "./agent";
+import { detectAgents, runAgentJob, type AgentId, type AgentJob, type CustomAgentConfig } from "./agent";
 import { clearBlockHandles, setBlockLogSink } from "./bbApi";
-import { detectRuntimes } from "./runtimes";
+import { testDirectApi } from "./directAgent";
+import { detectRuntimes, findBinary } from "./runtimes";
 import { blockContexts, blockSession, blockUrl, blockWebPreferences, consoleDetails, lockNavigation, type BlockContext } from "./sandbox";
 import { backendKey, ensureBackend, stopAllBackends, stopBackend } from "./supervisor";
 import { validateBlock } from "./validate";
@@ -48,6 +49,7 @@ interface OpenView {
 
 interface Settings {
   agent: AgentId;
+  customAgents?: CustomAgentConfig[];
 }
 
 let win: BrowserWindow | null = null;
@@ -76,7 +78,7 @@ function writeJson(file: string, value: unknown) {
   fs.writeFileSync(file, JSON.stringify(value, null, 2));
 }
 function settings(): Settings {
-  return readJson<Settings>(paths.settingsFile(), { agent: "claude" });
+  return readJson<Settings>(paths.settingsFile(), { agent: "claude", customAgents: [] });
 }
 
 async function ensureApproved(m: BlockManifest): Promise<boolean> {
@@ -520,12 +522,71 @@ function installHostIpc() {
   hostHandle("host:listBlocks", () => blockList());
   hostHandle("host:getSettings", () => settings());
   hostHandle("host:setSettings", (patch: Partial<Settings>) => {
-    const next = { ...settings(), ...patch };
-    if (!["claude", "gemini", "codex"].includes(next.agent)) throw new Error("unknown agent");
+    const cur = settings();
+    const next: Settings = {
+      ...cur,
+      ...patch,
+      agent: typeof patch.agent === "string" && patch.agent.trim() ? patch.agent.trim() : cur.agent,
+    };
     writeJson(paths.settingsFile(), next);
     return next;
   });
-  hostHandle("host:detectAgents", () => detectAgents());
+  hostHandle("host:detectAgents", () => detectAgents(settings().customAgents ?? []));
+  hostHandle("host:saveCustomAgent", async (cfg: CustomAgentConfig) => {
+    if (!cfg || typeof cfg.label !== "string" || !cfg.label.trim()) throw new Error("Agent name is required.");
+    const cur = settings();
+    const list = [...(cur.customAgents ?? [])];
+    const id = cfg.id?.trim() || `custom-${Date.now().toString(36)}`;
+    let entry: CustomAgentConfig;
+    if (cfg.kind === "cli") {
+      if (!cfg.command?.trim()) throw new Error("CLI command or binary path is required.");
+      entry = {
+        id,
+        label: cfg.label.trim().slice(0, 60),
+        kind: "cli",
+        command: cfg.command.trim(),
+        argsTemplate: cfg.argsTemplate?.trim() || undefined,
+        env: cfg.env,
+      };
+    } else if (cfg.kind === "api") {
+      if (!cfg.baseUrl?.trim() || !cfg.model?.trim()) throw new Error("Base URL and Model name are required.");
+      entry = {
+        id,
+        label: cfg.label.trim().slice(0, 60),
+        kind: "api",
+        baseUrl: cfg.baseUrl.trim(),
+        model: cfg.model.trim(),
+        apiKey: cfg.apiKey?.trim() || undefined,
+      };
+    } else {
+      throw new Error("Invalid agent kind");
+    }
+    const idx = list.findIndex((a) => a.id === id);
+    if (idx >= 0) list[idx] = entry;
+    else list.push(entry);
+    const next: Settings = { ...cur, agent: id, customAgents: list };
+    writeJson(paths.settingsFile(), next);
+    const agents = await detectAgents(list);
+    return { settings: next, agents };
+  });
+  hostHandle("host:deleteCustomAgent", async (id: string) => {
+    const cur = settings();
+    const list = (cur.customAgents ?? []).filter((a) => a.id !== id);
+    const agents = await detectAgents(list);
+    const nextAgent = cur.agent === id ? (agents.find((a) => a.path)?.id ?? "claude") : cur.agent;
+    const next: Settings = { ...cur, agent: nextAgent, customAgents: list };
+    writeJson(paths.settingsFile(), next);
+    return { settings: next, agents };
+  });
+  hostHandle("host:testAgent", async (cfg: CustomAgentConfig) => {
+    if (cfg.kind === "cli") {
+      const cmd = cfg.command?.trim() ?? "";
+      if (!cmd) return { ok: false, message: "Enter a command or binary path." };
+      const found = cmd.includes("/") || cmd.includes("\\") ? (fs.existsSync(cmd) ? cmd : null) : findBinary(cmd);
+      return found ? { ok: true, message: `Found binary at ${found}` } : { ok: false, message: `Binary '${cmd}' not found on PATH` };
+    }
+    return testDirectApi({ baseUrl: cfg.baseUrl, model: cfg.model, apiKey: cfg.apiKey });
+  });
   hostHandle("host:detectRuntimes", () => detectRuntimes(true));
   hostHandle("host:installSkill", () => installExternalSkill());
   hostHandle("host:createFromTemplate", (name: string, template: TemplateName) => {
@@ -620,12 +681,14 @@ function installHostIpc() {
     return out;
   });
 
-  hostHandle("host:startAgent", (req: { kind: "create" | "edit"; id?: string; request: string; agent?: AgentId }) => {
+  hostHandle("host:startAgent", async (req: { kind: "create" | "edit"; id?: string; request: string; agent?: AgentId }) => {
     const request = String(req.request ?? "").trim();
     if (request.length < 3) throw new Error("Describe what you want first.");
-    const agentId = req.agent ?? settings().agent;
-    const agent = detectAgents().find((a) => a.id === agentId);
-    if (!agent?.path) throw new Error(`${agent?.label ?? agentId} isn't installed (or not on your PATH).`);
+    const curSettings = settings();
+    const agentId = req.agent ?? curSettings.agent;
+    const allAgents = await detectAgents(curSettings.customAgents ?? []);
+    const agent = allAgents.find((a) => a.id === agentId);
+    if (!agent?.path) throw new Error(`${agent?.label ?? agentId} isn't installed or configured.`);
     let blockId = req.id;
     if (req.kind === "create") {
       const runtimes = detectRuntimes();
@@ -642,8 +705,7 @@ function installHostIpc() {
     const id = blockId;
     const isNewCreate = req.kind === "create";
     const job = runAgentJob({
-      agent: agentId,
-      agentPath: agent.path,
+      agent,
       blockId: id,
       kind: req.kind,
       request,
