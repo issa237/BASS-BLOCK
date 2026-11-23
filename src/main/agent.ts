@@ -58,12 +58,78 @@ export const BUILTIN_AGENTS: { id: BuiltinAgentId; label: string; bins: string[]
   { id: "qwen", label: "Qwen Code", bins: ["qwen"], hint: "Open-source coding CLI" },
 ];
 
+export interface BlockageReport {
+  id: string;
+  blockId: string;
+  createdAt: number;
+  request: string;
+  agent: string;
+  title: string;
+  error: string;
+  missingCapability: string;
+  proposal: string;
+  workaround?: string;
+  problems?: Problem[];
+}
+
 export type AgentEvent =
   | { type: "status"; text: string }
   | { type: "text"; text: string }
   | { type: "tool"; text: string }
   | { type: "log"; text: string }
-  | { type: "done"; ok: boolean; problems: Problem[]; summary?: string; cancelled?: boolean };
+  | { type: "done"; ok: boolean; problems: Problem[]; summary?: string; cancelled?: boolean; blockage?: BlockageReport };
+
+export function formatBlockageMarkdown(r: BlockageReport): string {
+  return `# BASS BLOCK Blockage & Implementation Proposal: ${r.title}
+
+- **Report ID**: \`${r.id}\`
+- **Block ID**: \`${r.blockId}\`
+- **Agent**: ${r.agent}
+- **Date**: ${new Date(r.createdAt).toISOString()}
+- **Missing Capability**: \`${r.missingCapability}\`
+
+## 1. User Request
+\`\`\`
+${r.request}
+\`\`\`
+
+## 2. Error / Limitation Encountered
+${r.error}
+${
+  r.problems?.length
+    ? "\n### Validation Problems\n" + r.problems.map((p) => `- **[${p.step}]**${p.file ? ` \`${p.file}\`:` : ""} ${p.message}`).join("\n")
+    : ""
+}
+
+## 3. Proposed BASS BLOCK Implementation
+${r.proposal}
+${r.workaround ? `\n## 4. Temporary Workaround Built\n${r.workaround}\n` : ""}`;
+}
+
+export function saveBlockageReport(r: BlockageReport): { jsonPath: string; mdPath: string; markdown: string } {
+  const dir = path.join(paths.stateDir(), "reports");
+  fs.mkdirSync(dir, { recursive: true });
+  const base = `${r.createdAt}-${r.blockId}`;
+  const jsonPath = path.join(dir, `${base}.json`);
+  const mdPath = path.join(dir, `${base}.md`);
+  const markdown = formatBlockageMarkdown(r);
+  fs.writeFileSync(jsonPath, JSON.stringify(r, null, 2) + "\n", "utf8");
+  fs.writeFileSync(mdPath, markdown, "utf8");
+  return { jsonPath, mdPath, markdown };
+}
+
+export function listBlockageReports(): BlockageReport[] {
+  const dir = path.join(paths.stateDir(), "reports");
+  if (!fs.existsSync(dir)) return [];
+  const out: BlockageReport[] = [];
+  for (const f of fs.readdirSync(dir).sort().reverse()) {
+    if (!f.endsWith(".json")) continue;
+    try {
+      out.push(JSON.parse(fs.readFileSync(path.join(dir, f), "utf8")));
+    } catch {}
+  }
+  return out;
+}
 
 function resolveCommandPath(cmd: string): string | null {
   const trimmed = cmd.trim();
@@ -172,7 +238,8 @@ function buildPrompt(kind: "create" | "edit" | "repair", blockId: string, reques
   const head = `You are working on a BASS BLOCK block (a sandboxed mini-app) in the current directory. Block id: ${blockId}.
 Reference example blocks (read-only) are in: ${TEMPLATES_DIR}
 ${runtimes}
-Follow the "bass-block-builder" rules in your instructions exactly. Only edit files in the current directory.`;
+Follow the "bass-block-builder" rules in your instructions exactly. Only edit files in the current directory.
+If the user's request cannot be fulfilled due to a missing BASS BLOCK host capability, sandbox restriction, or missing OS/hardware API, write a BLOCKAGE.json file in the current directory explaining the error and proposing how BASS BLOCK should implement that capability (and build the closest working fallback UI so validation passes).`;
   if (kind === "create")
     return `${head}
 
@@ -350,7 +417,67 @@ function describeTool(name: string, input: any): string {
 
 export interface AgentJob {
   cancel(): void;
-  done: Promise<{ ok: boolean; problems: Problem[]; cancelled?: boolean }>;
+  done: Promise<{ ok: boolean; problems: Problem[]; cancelled?: boolean; blockage?: BlockageReport }>;
+}
+
+function extractOrSynthesizeBlockage(
+  codeDir: string,
+  metaDir: string,
+  blockId: string,
+  request: string,
+  agentLabel: string,
+  ok: boolean,
+  problems: Problem[],
+): BlockageReport | undefined {
+  const blockageFile = path.join(codeDir, "BLOCKAGE.json");
+  const now = Date.now();
+  if (fs.existsSync(blockageFile)) {
+    try {
+      const raw = JSON.parse(fs.readFileSync(blockageFile, "utf8")) as Partial<BlockageReport>;
+      fs.copyFileSync(blockageFile, path.join(metaDir, "blockage.json"));
+      fs.unlinkSync(blockageFile);
+      const report: BlockageReport = {
+        id: `rep-${now.toString(36)}`,
+        blockId,
+        createdAt: now,
+        request,
+        agent: agentLabel,
+        title: String(raw.title || `Blockage building ${blockId}`).slice(0, 120),
+        error: String(raw.error || (raw as any).reason || "Requested feature exceeds current BASS BLOCK host/sandbox capabilities.").slice(0, 1500),
+        missingCapability: String(raw.missingCapability || "Host / SDK Extension").slice(0, 140),
+        proposal: String(
+          raw.proposal ||
+            "Extend the BASS BLOCK host and window.bb SDK to expose this capability behind a declared permission in block.json.",
+        ).slice(0, 4000),
+        workaround: raw.workaround ? String(raw.workaround).slice(0, 800) : undefined,
+        problems: problems.length ? problems : undefined,
+      };
+      saveBlockageReport(report);
+      return report;
+    } catch {
+      try {
+        fs.unlinkSync(blockageFile);
+      } catch {}
+    }
+  }
+
+  if (!ok && problems.length > 0) {
+    const first = problems[0];
+    const errSummary = problems.map((p) => `[${p.step}]${p.file ? ` ${p.file}:` : ""} ${p.message}`).join("\n");
+    return {
+      id: `rep-${now.toString(36)}`,
+      blockId,
+      createdAt: now,
+      request,
+      agent: agentLabel,
+      title: `Could not build "${request.slice(0, 56)}"`,
+      error: errSummary.slice(0, 1500),
+      missingCapability: first.step === "backend" ? "Polyglot Backend / Toolchain Support" : first.step === "files" ? "Sandbox / Resource Policy" : `Host / Validator (${first.step})`,
+      proposal: `1. Inspect the '${first.step}' failure encountered while building '${blockId}': ${first.message}\n2. Update the BASS BLOCK SDK / supervisor / validator or add a built-in bridge in src/main/bbApi.ts and sdk/skills/bass-block-builder/SKILL.md so AI agents can implement "${request.slice(0, 100)}" cleanly.`,
+      problems,
+    };
+  }
+  return undefined;
 }
 
 export function runAgentJob(opts: {
@@ -469,6 +596,10 @@ export function runAgentJob(opts: {
         code = await runOnce(buildPrompt("repair", opts.blockId, opts.request, result.problems));
       }
     } finally {
+      let blockage: BlockageReport | undefined;
+      if (!cancelled) {
+        blockage = extractOrSynthesizeBlockage(codeDir, metaDir, opts.blockId, opts.request, opts.agent.label, result.ok, result.problems);
+      }
       const changed = dirContentHash(codeDir) !== initialHash;
       if (cancelled) {
         if (opts.kind === "edit" && beforeRef) {
@@ -479,10 +610,10 @@ export function runAgentJob(opts: {
       } else if (changed) {
         history.snapshot(opts.blockId, `AI: ${opts.request.slice(0, 200)}`);
       }
-      emit({ type: "done", ok: result.ok && !cancelled, problems: result.problems, cancelled });
+      emit({ type: "done", ok: result.ok && !cancelled, problems: result.problems, cancelled, blockage });
       log.end();
+      return { ...result, cancelled, blockage };
     }
-    return { ...result, cancelled };
   })();
 
   return {

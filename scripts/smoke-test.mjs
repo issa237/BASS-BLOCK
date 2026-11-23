@@ -126,7 +126,7 @@ check("safeJoin blocks traversal", safeJoin("/a/b", "../../etc/passwd") === null
 // 8. Universal AI Agents: Custom CLI agent (OpenClaude style) + Built-in Direct API runner (Ollama / OpenRouter style)
 const alib = path.join(root, "dist/test-agent.cjs");
 await build({ entryPoints: [path.join(root, "src/main/agent.ts")], bundle: true, platform: "node", format: "cjs", outfile: alib, logLevel: "silent" });
-const { detectAgents, runAgentJob } = require(alib);
+const { detectAgents, runAgentJob, listBlockageReports } = require(alib);
 
 // 8a. Custom CLI agent test
 const mockCli = path.join(home, "mock-openclaude.sh");
@@ -284,6 +284,48 @@ check(
   "in-block AI (bb.ai), notifications, binary bb.emit, hardware perms & 206 byte-range media streaming pass validation",
   capV.status === 0 && capR.ok,
   JSON.stringify(capR.problems),
+);
+
+// 11. Blockage & Implementation Proposal report flow (BLOCKAGE.json → .meta/blockage.json + state/reports/*.md)
+const blockageCli = path.join(home, "mock-blockage.sh");
+fs.writeFileSync(
+  blockageCli,
+  `#!/bin/sh
+cat > BLOCKAGE.json <<'EOF'
+{
+  "title": "Raw Kernel Driver Access Not Supported",
+  "error": "Blocks cannot load unsigned kernel extensions (.kext) from user space.",
+  "missingCapability": "Kernel / System Extension Bridge",
+  "proposal": "Add a privileged helper or DriverKit bridge to BASS BLOCK for hardware driver blocks.",
+  "workaround": "Built a user-space simulation UI instead."
+}
+EOF
+echo '{"type":"result","result":"Reported blockage and proposal"}'
+`,
+  { mode: 0o755 },
+);
+const blkDesc = (await detectAgents([{ id: "blk-cli", label: "Blockage Agent", kind: "cli", command: blockageCli }])).find((a) => a.id === "blk-cli");
+const blkJob = runAgentJob({
+  agent: blkDesc,
+  blockId: "s-blank",
+  kind: "edit",
+  request: "Build a raw kernel kext loader",
+  validate: async () => ({ ok: true, problems: [] }),
+  onEvent: () => {},
+});
+const blkRes = await blkJob.done;
+const savedReports = listBlockageReports();
+check(
+  "detects BLOCKAGE.json, cleans it from code/, and saves markdown proposal to state/reports/",
+  Boolean(
+    blkRes.blockage &&
+      blkRes.blockage.title === "Raw Kernel Driver Access Not Supported" &&
+      blkRes.blockage.proposal.includes("DriverKit") &&
+      !fs.existsSync(path.join(home, "blocks/s-blank/code/BLOCKAGE.json")) &&
+      fs.existsSync(path.join(home, "blocks/s-blank/.meta/blockage.json")) &&
+      savedReports.length === 1 &&
+      savedReports[0].missingCapability === "Kernel / System Extension Bridge",
+  ),
 );
 
 fs.rmSync(alib, { force: true });

@@ -31,7 +31,16 @@ import {
   type TemplateName,
 } from "../shared/blocks";
 import { APP_ROOT, IS_PACKAGED, SKILL_PATH, bbHome, paths } from "../shared/paths";
-import { detectAgents, runAgentJob, type AgentId, type AgentJob, type CustomAgentConfig } from "./agent";
+import {
+  detectAgents,
+  listBlockageReports,
+  runAgentJob,
+  saveBlockageReport,
+  type AgentId,
+  type AgentJob,
+  type BlockageReport,
+  type CustomAgentConfig,
+} from "./agent";
 import { clearBlockHandles, setBlockLogSink } from "./bbApi";
 import { testDirectApi } from "./directAgent";
 import { detectRuntimes, findBinary } from "./runtimes";
@@ -592,6 +601,35 @@ function installHostIpc() {
   hostHandle("host:installSkill", () => installExternalSkill());
   hostHandle("host:openExternal", (url: string) => {
     if (typeof url === "string" && /^https:\/\//i.test(url)) return shell.openExternal(url);
+  });
+  hostHandle("host:submitBlockageReport", async (raw: Partial<BlockageReport>, mode: "save" | "github" = "save") => {
+    const now = raw.createdAt || Date.now();
+    const report: BlockageReport = {
+      id: raw.id || `rep-${now.toString(36)}`,
+      blockId: raw.blockId || "general",
+      createdAt: now,
+      request: String(raw.request || "").slice(0, 2000),
+      agent: String(raw.agent || settings().agent),
+      title: String(raw.title || "Blockage Report & Feature Proposal").slice(0, 120),
+      error: String(raw.error || "").slice(0, 2000),
+      missingCapability: String(raw.missingCapability || "Host / SDK Extension").slice(0, 160),
+      proposal: String(raw.proposal || "").slice(0, 6000),
+      workaround: raw.workaround ? String(raw.workaround).slice(0, 1000) : undefined,
+      problems: raw.problems,
+    };
+    const saved = saveBlockageReport(report);
+    if (mode === "github") {
+      const issueTitle = encodeURIComponent(`[Blockage Proposal] ${report.title}`);
+      const issueBody = encodeURIComponent(saved.markdown.slice(0, 6000));
+      await shell.openExternal(`https://github.com/issa237/BASS-BLOCK/issues/new?title=${issueTitle}&body=${issueBody}`);
+    }
+    return { ok: true, report, ...saved };
+  });
+  hostHandle("host:listBlockageReports", () => listBlockageReports());
+  hostHandle("host:revealReports", () => {
+    const dir = path.join(paths.stateDir(), "reports");
+    fs.mkdirSync(dir, { recursive: true });
+    return shell.openPath(dir);
   });
   hostHandle("host:previewSkill", (source: string) => fetchSkillFromLink(source));
   hostHandle("host:pickSkillFile", async () => {

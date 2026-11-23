@@ -38,9 +38,22 @@ interface RuntimeInfo {
   };
 }
 interface HistoryEntry { ref: string; message: string; at: number }
+interface BlockageReport {
+  id: string;
+  blockId: string;
+  createdAt: number;
+  request: string;
+  agent: string;
+  title: string;
+  error: string;
+  missingCapability: string;
+  proposal: string;
+  workaround?: string;
+  problems?: { step: string; message: string; file?: string }[];
+}
 type AgentEvent =
   | { type: "status" | "text" | "tool" | "log"; text: string }
-  | { type: "done"; ok: boolean; problems: { step: string; message: string; file?: string }[]; cancelled?: boolean };
+  | { type: "done"; ok: boolean; problems: { step: string; message: string; file?: string }[]; cancelled?: boolean; blockage?: BlockageReport };
 
 declare const host: any;
 
@@ -424,6 +437,7 @@ async function blockMenu(id: string) {
     { id: "history", label: "Version History…" },
     { separator: true },
     { id: "validate", label: "Run validation" },
+    { id: "report", label: "Report Blockage / Proposal…" },
     { id: "devtools", label: "Toggle Developer Tools", enabled: isOpen },
     { id: "reveal", label: "Show in Finder" },
     { separator: true },
@@ -442,6 +456,14 @@ async function blockMenu(id: string) {
       if (r) toast(r.ok ? `✓ ${b?.name} passed validation` : `✗ ${r.problems.length} problem(s): ${r.problems[0]?.message}`, r.ok ? "info" : "err");
       return;
     }
+    case "report":
+      return showBlockageModal({
+        blockId: id,
+        request: b?.description || `Enhancement for ${b?.name ?? id}`,
+        agent: state.agent,
+        title: `Capability request for ${b?.name ?? id}`,
+        error: b?.error || "",
+      });
     case "devtools": return host.devtools(id);
     case "reveal": return host.reveal(id);
     case "close": return closeBlock(id);
@@ -859,14 +881,55 @@ function showProgress(blockId: string) {
         h("button", { class: "btn primary", onclick: () => m.close() }, "Hide"),
       );
     } else if (done.ok) {
-      foot.append(h("span", { class: "spacer" }), h("button", { class: "btn", onclick: () => m.close() }, "Done"), h("button", { class: "btn primary", onclick: () => (m.close(), openBlock(blockId)) }, "Open block"));
+      if (done.blockage) {
+        extra.append(
+          h(
+            "div",
+            { class: "skill-card" },
+            h("div", { class: "row" }, svg(ICONS.bolt), h("strong", {}, `Blockage Reported: ${done.blockage.title}`), h("span", { class: "spacer" }), h("span", { class: "chip busy" }, done.blockage.missingCapability)),
+            h("p", {}, done.blockage.error),
+          ),
+        );
+      }
+      foot.append(
+        ...nodes(
+          done.blockage
+            ? h("button", { class: "btn", onclick: () => showBlockageModal(done.blockage!) }, svg(ICONS.bolt), "Report Blockage & Proposal…")
+            : null,
+          h("span", { class: "spacer" }),
+          h("button", { class: "btn", onclick: () => m.close() }, "Done"),
+          h("button", { class: "btn primary", onclick: () => (m.close(), openBlock(blockId)) }, "Open block"),
+        ),
+      );
     } else if (done.cancelled && job.kind === "create") {
       foot.append(h("span", { class: "spacer" }), h("button", { class: "btn primary", onclick: () => m.close() }, "Close"));
     } else {
-      if (done.problems.length) extra.append(h("ol", { class: "problems" }, ...done.problems.slice(0, 8).map((p) => h("li", {}, `${p.file ? p.file + ": " : ""}${p.message}`))));
+      if (done.blockage) {
+        extra.append(
+          h(
+            "div",
+            { class: "skill-card" },
+            h("div", { class: "row" }, svg(ICONS.bolt), h("strong", {}, done.blockage.title), h("span", { class: "spacer" }), h("span", { class: "chip err" }, done.blockage.missingCapability)),
+            h("p", {}, done.blockage.error),
+          ),
+        );
+      } else if (done.problems.length) {
+        extra.append(h("ol", { class: "problems" }, ...done.problems.slice(0, 8).map((p) => h("li", {}, `${p.file ? p.file + ": " : ""}${p.message}`))));
+      }
       const more = h("textarea", { class: "prompt", style: "min-height:72px", placeholder: "Add more detail for the next try (optional)" });
       if (!done.cancelled) extra.append(more);
+      const reportPayload: Partial<BlockageReport> = done.blockage ?? {
+        blockId,
+        request: job.request,
+        agent: state.agent,
+        title: `Cannot build: ${job.request.slice(0, 56)}`,
+        error: done.problems.map((p) => `[${p.step}] ${p.message}`).join("\n"),
+        missingCapability: "Host / SDK Extension",
+        proposal: `Implement support in BASS BLOCK host / bb SDK to resolve: ${done.problems.map((p) => p.message).join("; ")}`,
+        problems: done.problems,
+      };
       foot.append(
+        h("button", { class: "btn", onclick: () => showBlockageModal(reportPayload) }, svg(ICONS.bolt), "Report Blockage & Proposal…"),
         h("span", { class: "spacer" }),
         h("button", { class: "btn", onclick: () => (m.close(), openBlock(blockId)) }, "Open anyway"),
         h(
@@ -977,6 +1040,15 @@ async function showSettings() {
       h(
         "button",
         {
+          class: "btn small",
+          onclick: () => showSavedBlockageReports(),
+        },
+        svg(ICONS.bolt),
+        "Blockage Proposals",
+      ),
+      h(
+        "button",
+        {
           class: "btn primary small",
           onclick: () => showLinkAgent(),
         },
@@ -1034,6 +1106,129 @@ function copyCmdRow(cmd: string) {
       "Copy",
     ),
   );
+}
+
+function showBlockageModal(initial: Partial<BlockageReport> = {}) {
+  const titleIn = h("input", {
+    class: "input",
+    placeholder: "Short summary of what could not be built",
+    value: initial.title ?? "",
+  });
+  const capIn = h("input", {
+    class: "input",
+    placeholder: "Missing BASS BLOCK capability or system requirement (e.g. WebUSB API, custom native bridge)",
+    value: initial.missingCapability ?? "Host / SDK Extension",
+  });
+  const errIn = h("textarea", {
+    class: "prompt",
+    style: "min-height:84px;font-size:12.5px",
+    placeholder: "Describe the error or limitation encountered…",
+    value: initial.error ?? "",
+  });
+  const propIn = h("textarea", {
+    class: "prompt",
+    style: "min-height:130px;font-size:12.5px",
+    placeholder: "Technical proposal for how BASS BLOCK should implement this capability…",
+    value:
+      initial.proposal ??
+      "1. Expose the missing capability in src/main/bbApi.ts and src/preload/block.ts.\n2. Gate it behind a declared permission in sdk/block.schema.json.\n3. Document usage in sdk/skills/bass-block-builder/SKILL.md.",
+  });
+
+  function buildReport(): Partial<BlockageReport> {
+    return {
+      ...initial,
+      title: titleIn.value.trim() || "Blockage Report & Feature Proposal",
+      missingCapability: capIn.value.trim() || "Host / SDK Extension",
+      error: errIn.value.trim(),
+      proposal: propIn.value.trim(),
+    };
+  }
+
+  const m = modal({
+    title: "Report Blockage & Feature Proposal",
+    head: [
+      h("button", { class: "btn small", onclick: () => showSavedBlockageReports() }, "Saved Reports"),
+    ],
+    body: [
+      h(
+        "p",
+        { class: "hint", style: "margin:0" },
+        "When a block requests a capability BASS BLOCK doesn't support yet, this report logs the error and sends an implementation proposal so we can add it to BASS BLOCK.",
+      ),
+      h("div", { class: "field" }, h("label", {}, "What Could Not Be Built"), titleIn),
+      h("div", { class: "field" }, h("label", {}, "Missing Capability / SDK Feature"), capIn),
+      h("div", { class: "field" }, h("label", {}, "Error / Limitation Details"), errIn),
+      h("div", { class: "field" }, h("label", {}, "Proposed BASS BLOCK Implementation (Editable)"), propIn),
+    ],
+    foot: [
+      h("button", { class: "btn ghost", onclick: () => m.close() }, "Close"),
+      h("span", { class: "spacer" }),
+      h(
+        "button",
+        {
+          class: "btn",
+          onclick: async () => {
+            const res = await attempt(() => host.submitBlockageReport(buildReport(), "save"));
+            if (res) {
+              navigator.clipboard?.writeText(res.markdown);
+              toast("Saved report & copied proposal Markdown to clipboard");
+              m.close();
+            }
+          },
+        },
+        svg(ICONS.clipboard),
+        "Save & Copy Proposal",
+      ),
+      h(
+        "button",
+        {
+          class: "btn primary",
+          onclick: async () => {
+            const res = await attempt(() => host.submitBlockageReport(buildReport(), "github"));
+            if (res) {
+              navigator.clipboard?.writeText(res.markdown);
+              toast("Opened GitHub Issue & saved proposal locally");
+              m.close();
+            }
+          },
+        },
+        svg(ICONS.globe),
+        "Send Proposal to GitHub ↗",
+      ),
+    ],
+  });
+}
+
+async function showSavedBlockageReports() {
+  const reports = ((await attempt(() => host.listBlockageReports())) as BlockageReport[] | undefined) ?? [];
+  const list = h("ul", { class: "history-list" });
+  list.replaceChildren(
+    ...reports.map((r) =>
+      h(
+        "li",
+        { class: "history-row" },
+        h("span", { class: "h-meta" }, new Date(r.createdAt).toLocaleDateString([], { month: "short", day: "numeric" })),
+        h("span", { class: "chip busy" }, r.missingCapability),
+        h("span", { class: "h-msg", title: r.error }, r.title),
+        h("button", { class: "btn small", onclick: () => showBlockageModal(r) }, "Open Proposal"),
+      ),
+    ),
+  );
+  modal({
+    title: "Blockage Reports & Implementation Proposals",
+    head: [
+      h("button", { class: "btn small", onclick: () => host.revealReports() }, "Show Folder in Finder"),
+      h("button", { class: "btn primary small", onclick: () => showBlockageModal() }, svg(ICONS.plus), "New Proposal"),
+    ],
+    body: [
+      h("p", { class: "hint", style: "margin:0" }, "All reported blockages and AI implementation proposals are saved as Markdown in ~/BassBlock/state/reports/."),
+      reports.length ? list : h("p", { class: "hint" }, "No blockage reports recorded yet."),
+    ],
+    foot: [
+      h("button", { class: "btn ghost", onclick: () => showSettings() }, "← Back to AI Settings"),
+      h("span", { class: "spacer" }),
+    ],
+  });
 }
 
 function showRuntimeInstallModal(rt: RuntimeInfo) {

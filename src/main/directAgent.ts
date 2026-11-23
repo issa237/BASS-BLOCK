@@ -187,7 +187,8 @@ One or two sentence summary of what you built or fixed.
 
 Rules:
 - Always keep "id": "${blockId}" in block.json.
-- Output complete file contents for every file you touch (never use "// ... existing code ...").`;
+- Output complete file contents for every file you touch (never use "// ... existing code ...").
+- If any part of the user's request cannot be built due to a missing BASS BLOCK capability or sandbox limit, also output <<<FILE: BLOCKAGE.json>>> with { "title", "error", "missingCapability", "proposal", "workaround" } and a working fallback UI.`;
 
   const userContent = `${prompt}\n\nCurrent files in the block directory:\n\n${existingFiles}`;
 

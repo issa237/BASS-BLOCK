@@ -197,6 +197,24 @@ bb.emit("stats", { words: 120 })                 // to every other open block
 const off = bb.on("text", (data, { from }) => {})  // returns an unsubscribe function
 ```
 
+## When a Request Cannot Be Built (`BLOCKAGE.json`)
+
+If the user asks for something that **cannot be built or run** due to a missing BASS BLOCK host capability, sandbox restriction, missing OS/hardware API, or missing system binary/driver:
+1. Build the closest working fallback or companion UI in the block if possible (so the block still renders and passes `bassblock validate`).
+2. Write a `BLOCKAGE.json` file inside the block's `code/` folder with an error report and a concrete technical proposal for how BASS BLOCK should implement the missing capability:
+
+```json
+{
+  "title": "Short summary of what could not be built",
+  "error": "Clear explanation of the exact limitation or error encountered",
+  "missingCapability": "Name of the missing BASS BLOCK API, permission, or runtime feature",
+  "proposal": "Step-by-step technical proposal for how the BASS BLOCK host / bb SDK should implement this feature",
+  "workaround": "What partial or fallback functionality was built in the meantime (if any)"
+}
+```
+
+The BASS BLOCK host automatically detects `BLOCKAGE.json` and opens a modal allowing the user to review and submit your proposal for implementation.
+
 ## Example blocks
 
 Look at the templates for working patterns before writing your own:
