@@ -64,6 +64,12 @@
           "pattern": "^/.*",
           "default": "/health",
           "description": "For 'http' protocol backends: GET path polled on 127.0.0.1:$BB_PORT until it returns 2xx."
+        },
+        "dependencies": {
+          "type": "array",
+          "items": { "type": "string", "pattern": "^[A-Za-z0-9_.@/~<>=!-]+$" },
+          "maxItems": 30,
+          "description": "Optional packages (PyPI packages for Python or npm packages for Node.js) automatically installed into code/.bin/."
         }
       }
     },
@@ -83,7 +89,13 @@
           ],
           "default": false
         },
-        "clipboard": { "type": "boolean", "default": false }
+        "clipboard": { "type": "boolean", "default": false },
+        "camera": { "type": "boolean", "default": false },
+        "microphone": { "type": "boolean", "default": false },
+        "midi": { "type": "boolean", "default": false },
+        "notifications": { "type": "boolean", "default": false },
+        "background": { "type": "boolean", "default": false },
+        "ai": { "type": "boolean", "default": false }
       }
     },
     "io": {

@@ -73,6 +73,8 @@ const bb = {
     read: (handle: string, opts?: { encoding?: "utf8" }) => call("fs.read", handle, opts),
     readText: (handle: string) => call("fs.read", handle, { encoding: "utf8" }),
     write: (handle: string, data: string | Uint8Array | ArrayBuffer) => call("fs.write", handle, data),
+    url: (handle: string) => call("fs.url", handle),
+    path: (handle: string) => call("fs.path", handle),
     listDir: (dirHandle: string, relDir?: string) => call("fs.listDir", dirHandle, relDir ?? ""),
     readDirFile: (dirHandle: string, relPath: string, opts?: { encoding?: "utf8" }) => call("fs.readDirFile", dirHandle, relPath, opts),
     readDirText: (dirHandle: string, relPath: string) => call("fs.readDirFile", dirHandle, relPath, { encoding: "utf8" }),
@@ -82,6 +84,14 @@ const bb = {
   clipboard: {
     readText: () => call("clipboard.readText"),
     writeText: (text: string) => call("clipboard.writeText", text),
+  },
+
+  notify: (opts: { title?: string; body?: string } | string) => call("notify", opts),
+
+  ai: {
+    complete: (prompt: string, opts?: { system?: string; temperature?: number }) => call("ai.complete", prompt, opts ?? {}),
+    chat: (messages: { role: "system" | "user" | "assistant"; content: string }[], opts?: { system?: string; temperature?: number }) =>
+      call("ai.chat", messages, opts ?? {}),
   },
 
   net: {

@@ -13,6 +13,12 @@ export interface BlockPermissions {
   fs?: "none" | "user-picked-files";
   network?: NetworkPermission;
   clipboard?: boolean;
+  camera?: boolean;
+  microphone?: boolean;
+  midi?: boolean;
+  notifications?: boolean;
+  background?: boolean;
+  ai?: boolean;
 }
 
 export interface BlockPort {
@@ -27,6 +33,7 @@ export interface BlockBackend {
   build?: string | string[];
   run: string | string[];
   healthPath?: string;
+  dependencies?: string[];
 }
 
 export interface BlockManifest {
@@ -72,19 +79,38 @@ export function effectivePermissions(m: BlockManifest): Required<BlockPermission
     fs: m.permissions?.fs ?? "none",
     network: m.permissions?.network ?? false,
     clipboard: m.permissions?.clipboard ?? false,
+    camera: m.permissions?.camera ?? false,
+    microphone: m.permissions?.microphone ?? false,
+    midi: m.permissions?.midi ?? false,
+    notifications: m.permissions?.notifications ?? false,
+    background: m.permissions?.background ?? false,
+    ai: m.permissions?.ai ?? false,
   };
 }
 
 /** Stable hash of a block's permissions + backend command; approvals are tied to it so edits re-prompt. */
 export function permissionsHash(m: BlockManifest): string {
   const p = effectivePermissions(m);
-  const b = m.mode === "polyglot" && m.backend
-    ? { language: m.backend.language, protocol: m.backend.protocol ?? "stdio", build: m.backend.build ?? null, run: m.backend.run }
-    : null;
+  const b =
+    m.mode === "polyglot" && m.backend
+      ? {
+          language: m.backend.language,
+          protocol: m.backend.protocol ?? "stdio",
+          build: m.backend.build ?? null,
+          run: m.backend.run,
+          dependencies: m.backend.dependencies ? [...m.backend.dependencies].sort() : null,
+        }
+      : null;
   const norm = JSON.stringify({
     fs: p.fs,
     network: Array.isArray(p.network) ? [...p.network].sort() : p.network,
     clipboard: p.clipboard,
+    camera: p.camera,
+    microphone: p.microphone,
+    midi: p.midi,
+    notifications: p.notifications,
+    background: p.background,
+    ai: p.ai,
     backend: b,
   });
   return crypto.createHash("sha256").update(norm).digest("hex").slice(0, 16);
@@ -92,7 +118,18 @@ export function permissionsHash(m: BlockManifest): string {
 
 export function needsApproval(m: BlockManifest): boolean {
   const p = effectivePermissions(m);
-  return p.fs !== "none" || p.network !== false || p.clipboard || (m.mode === "polyglot" && !!m.backend);
+  return (
+    p.fs !== "none" ||
+    p.network !== false ||
+    p.clipboard ||
+    p.camera ||
+    p.microphone ||
+    p.midi ||
+    p.notifications ||
+    p.background ||
+    p.ai ||
+    (m.mode === "polyglot" && !!m.backend)
+  );
 }
 
 export function describePermissions(m: BlockManifest): string[] {
@@ -100,12 +137,19 @@ export function describePermissions(m: BlockManifest): string[] {
   const out: string[] = [];
   if (m.mode === "polyglot" && m.backend) {
     const cmd = Array.isArray(m.backend.run) ? m.backend.run.join(" ") : m.backend.run;
-    out.push(`Run a local ${m.backend.language} backend (${cmd}) — runs outside the web sandbox with full access to your Mac's files and network`);
+    const deps = m.backend.dependencies?.length ? ` [packages: ${m.backend.dependencies.join(", ")}]` : "";
+    out.push(`Run a local ${m.backend.language} backend (${cmd})${deps} — runs outside the web sandbox with full access to your Mac's files and network`);
   }
   if (p.fs === "user-picked-files") out.push("Read and write files that you pick in a file dialog");
   if (p.network === true) out.push("Connect to any HTTPS website");
   else if (Array.isArray(p.network) && p.network.length) out.push(`Connect to: ${p.network.join(", ")}`);
   if (p.clipboard) out.push("Read and write the clipboard");
+  if (p.camera) out.push("Access your camera");
+  if (p.microphone) out.push("Access your microphone");
+  if (p.midi) out.push("Access MIDI musical devices");
+  if (p.notifications) out.push("Show desktop notifications");
+  if (p.background) out.push("Keep running in the background while other blocks are active");
+  if (p.ai) out.push("Use your linked AI model inside the block (bb.ai)");
   return out;
 }
 

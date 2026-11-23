@@ -6,10 +6,12 @@
 import fs from "node:fs";
 import path from "node:path";
 import crypto from "node:crypto";
-import { BrowserWindow, clipboard, dialog, ipcMain, net, webContents, type IpcMainInvokeEvent } from "electron";
+import { spawn } from "node:child_process";
+import { BrowserWindow, clipboard, dialog, ipcMain, net, Notification, webContents, type IpcMainInvokeEvent } from "electron";
 import { effectivePermissions } from "../shared/blocks";
-import { safeJoin } from "../shared/paths";
-import { blockContexts, type BlockContext } from "./sandbox";
+import { paths, safeJoin } from "../shared/paths";
+import { detectAgents, type CustomAgentConfig, type CustomApiAgent } from "./agent";
+import { BLOCK_SCHEME, blockContexts, setFsHandleResolver, type BlockContext } from "./sandbox";
 import { backendKey, callBackend, fetchBackend, setSupervisorCallbacks } from "./supervisor";
 
 const STORAGE_LIMIT = 10 * 1024 * 1024;
@@ -262,6 +264,18 @@ const methods: Record<string, Method> = {
     await fs.promises.writeFile(h.path, toBuffer(data));
     return true;
   },
+  "fs.url": (ctx, e, handle: string) => {
+    requireFs(ctx);
+    const h = handleMap(ctx, e).get(String(handle));
+    if (!h || h.isDir) throw new BBError("invalid", "unknown file handle");
+    return `${BLOCK_SCHEME}://${ctx.blockId}/__fs__/${encodeURIComponent(String(handle))}`;
+  },
+  "fs.path": (ctx, e, handle: string) => {
+    requireFs(ctx);
+    const h = handleMap(ctx, e).get(String(handle));
+    if (!h) throw new BBError("invalid", "unknown file or directory handle");
+    return h.path;
+  },
   "fs.listDir": async (ctx, e, dirHandle: string, relDir = "") => {
     requireFs(ctx);
     const h = handleMap(ctx, e).get(String(dirHandle));
@@ -368,10 +382,42 @@ const methods: Record<string, Method> = {
     );
   },
 
-  // ---- event bus between open blocks ----
+  // ---- desktop notifications ----
+  "notify": (ctx, _e, opts: { title?: string; body?: string } | string) => {
+    if (!effectivePermissions(ctx.manifest).notifications) {
+      throw new BBError("permission", `This block did not declare "notifications": true in block.json`);
+    }
+    if (ctx.validating) return true;
+    const title = typeof opts === "string" ? ctx.manifest.name : (opts?.title || ctx.manifest.name);
+    const body = typeof opts === "string" ? opts : (opts?.body ?? "");
+    if (Notification.isSupported()) {
+      new Notification({ title: String(title).slice(0, 120), body: String(body).slice(0, 400) }).show();
+    }
+    return true;
+  },
+
+  // ---- in-block AI bridge (reuses BASS BLOCK's linked AI model or CLI agent) ----
+  "ai.chat": async (ctx, _e, messages: { role: string; content: string }[], opts: { system?: string; temperature?: number } = {}) => {
+    if (!effectivePermissions(ctx.manifest).ai) {
+      throw new BBError("permission", `This block did not declare "ai": true in block.json`);
+    }
+    if (!Array.isArray(messages) || !messages.length) throw new BBError("invalid", "messages must be a non-empty array");
+    if (ctx.validating && !process.env.BB_VALIDATE_LIVE_AI) return "Validation AI response";
+    return runInBlockAi(messages, opts);
+  },
+  "ai.complete": async (ctx, _e, prompt: string, opts: { system?: string; temperature?: number } = {}) => {
+    if (!effectivePermissions(ctx.manifest).ai) {
+      throw new BBError("permission", `This block did not declare "ai": true in block.json`);
+    }
+    if (typeof prompt !== "string" || !prompt.trim()) throw new BBError("invalid", "prompt must be a non-empty string");
+    if (ctx.validating && !process.env.BB_VALIDATE_LIVE_AI) return "Validation AI response";
+    return runInBlockAi([{ role: "user", content: prompt }], opts);
+  },
+
+  // ---- event bus between open blocks (structured-clone binary safe: preserves Uint8Array / ArrayBuffer) ----
   "emit": (ctx, e, name: string, data: unknown) => {
     if (typeof name !== "string" || !/^[a-zA-Z][\w.-]{0,63}$/.test(name)) throw new BBError("invalid", "event name must be a short identifier");
-    const payload = JSON.parse(JSON.stringify(data ?? null));
+    const payload = data === undefined ? null : data;
     for (const [wcId, other] of blockContexts.all()) {
       if (wcId === e.sender.id || other.validating) continue;
       webContents.fromId(wcId)?.send("bb:event", { from: ctx.blockId, name, data: payload });
@@ -380,7 +426,78 @@ const methods: Record<string, Method> = {
   },
 };
 
+async function runInBlockAi(
+  messages: { role: string; content: string }[],
+  opts: { system?: string; temperature?: number } = {},
+): Promise<string> {
+  let saved: { agent?: string; customAgents?: CustomAgentConfig[] } = {};
+  try {
+    saved = JSON.parse(fs.readFileSync(paths.settingsFile(), "utf8"));
+  } catch {}
+  const agents = await detectAgents(saved.customAgents ?? []);
+  const active =
+    agents.find((a) => a.id === saved.agent && a.path) ??
+    agents.find((a) => (a.kind === "custom-api" || a.kind === "ollama") && a.path) ??
+    agents.find((a) => a.path);
+  if (!active || !active.path) {
+    throw new BBError("unavailable", "No AI agent or model is configured in BASS BLOCK AI Settings.");
+  }
+
+  const allMessages = opts.system ? [{ role: "system", content: String(opts.system) }, ...messages] : messages;
+
+  // 1. Direct API / Ollama model
+  if (active.kind === "custom-api" || active.kind === "ollama") {
+    const cfg = active.config as CustomApiAgent;
+    const url = `${cfg.baseUrl.replace(/\/+$/, "")}/chat/completions`;
+    const headers: Record<string, string> = { "Content-Type": "application/json" };
+    if (cfg.apiKey?.trim()) headers["Authorization"] = `Bearer ${cfg.apiKey.trim()}`;
+    const res = await fetch(url, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({
+        model: cfg.model,
+        messages: allMessages,
+        temperature: typeof opts.temperature === "number" ? opts.temperature : 0.4,
+      }),
+      signal: AbortSignal.timeout(45000),
+    });
+    if (!res.ok) throw new BBError("runtime", `AI model error (${res.status}): ${(await res.text().catch(() => "")).slice(0, 300)}`);
+    const json = (await res.json()) as { choices?: { message?: { content?: string } }[] };
+    return json.choices?.[0]?.message?.content ?? "";
+  }
+
+  // 2. CLI Agent fallback
+  const flatPrompt = allMessages.map((m) => `${m.role.toUpperCase()}: ${m.content}`).join("\n\n");
+  return new Promise<string>((resolve, reject) => {
+    const child = spawn(active.path!, ["-p", flatPrompt], { stdio: ["ignore", "pipe", "pipe"] });
+    let out = "";
+    let err = "";
+    child.stdout?.on("data", (d) => (out += d.toString()));
+    child.stderr?.on("data", (d) => (err += d.toString()));
+    const timer = setTimeout(() => {
+      try {
+        child.kill("SIGKILL");
+      } catch {}
+      reject(new BBError("timeout", "AI request timed out after 45s"));
+    }, 45000);
+    child.on("close", (code) => {
+      clearTimeout(timer);
+      if (code === 0 || out.trim()) resolve(out.trim());
+      else reject(new BBError("runtime", err.trim().slice(0, 400) || `AI agent exited with code ${code}`));
+    });
+  });
+}
+
 export function installBBApi(): void {
+  setFsHandleResolver((blockId, handleId) => {
+    for (const [k, map] of handles.entries()) {
+      if (k === `live:${blockId}` || k.startsWith("val:")) {
+        const found = map.get(handleId);
+        if (found && !found.isDir) return found.path;
+      }
+    }
+    return null;
+  });
   setSupervisorCallbacks({
     onLog: (blockId, level, text) => logSink(blockId, level, text),
     onEvent: (wcId, event, data) => {

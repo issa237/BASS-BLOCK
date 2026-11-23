@@ -234,6 +234,58 @@ check(
   importedRemote.name === "Audio Spectrum Analyzer" && importedRemote.description.includes("Real-time FFT"),
 );
 
+// 10. Unified Solutions A/B/C: bb.ai.*, bb.notify, hardware permissions, binary bb.emit, and HTTP 206 byte-range media streaming
+cli("create", "s-capabilities", "--template", "blank");
+const capDir = path.join(home, "blocks/s-capabilities/code");
+fs.writeFileSync(
+  path.join(capDir, "block.json"),
+  JSON.stringify(
+    {
+      schema: 1,
+      id: "s-capabilities",
+      name: "Capabilities Test",
+      version: "0.1.0",
+      mode: "web",
+      sdk: "^1.0",
+      entry: { ui: "index.html" },
+      permissions: {
+        fs: "user-picked-files",
+        network: false,
+        clipboard: false,
+        camera: true,
+        microphone: true,
+        midi: true,
+        notifications: true,
+        background: true,
+        ai: true,
+      },
+    },
+    null,
+    2,
+  ),
+);
+fs.writeFileSync(path.join(capDir, "sample.mp4"), "0123456789ABCDEF");
+fs.writeFileSync(
+  path.join(capDir, "main.js"),
+  `const aiText = await bb.ai.complete("Hello AI");
+if (!aiText) throw new Error("bb.ai.complete returned empty");
+await bb.notify({ title: "Test", body: "Notification ok" });
+await bb.emit("frame", new Uint8Array([10, 20, 30, 40]));
+const rangeRes = await fetch("sample.mp4", { headers: { Range: "bytes=0-3" } });
+const rangeText = await rangeRes.text();
+if (rangeRes.status !== 206 || rangeText !== "0123") throw new Error("Range request failed: " + rangeRes.status + " " + rangeText);
+document.getElementById("title").textContent = aiText + " · " + rangeText;
+bb.ready();
+`,
+);
+const capV = cli("validate", "s-capabilities", "--json");
+const capR = JSON.parse(capV.stdout || "{}");
+check(
+  "in-block AI (bb.ai), notifications, binary bb.emit, hardware perms & 206 byte-range media streaming pass validation",
+  capV.status === 0 && capR.ok,
+  JSON.stringify(capR.problems),
+);
+
 fs.rmSync(alib, { force: true });
 fs.rmSync(home, { recursive: true, force: true });
 console.log(failed ? `\n${failed} check(s) failed` : "\nAll checks passed");

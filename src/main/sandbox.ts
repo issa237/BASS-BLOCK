@@ -7,9 +7,10 @@
  */
 import fs from "node:fs";
 import path from "node:path";
+import { Readable } from "node:stream";
 import { stripTypeScriptTypes } from "node:module";
 import { protocol, session, type Session, type WebContents, type WebPreferences } from "electron";
-import type { BlockManifest } from "../shared/blocks";
+import { effectivePermissions, readManifest, type BlockManifest } from "../shared/blocks";
 import { safeJoin } from "../shared/paths";
 
 export const BLOCK_SCHEME = "block";
@@ -91,6 +92,71 @@ export const blockContexts = {
 const configured = new WeakSet<Session>();
 const sessionDirs = new Map<string, { blockId: string; codeDir: string }>();
 
+type FsHandleResolver = (blockId: string, handle: string) => string | null;
+let resolveFsHandle: FsHandleResolver = () => null;
+export function setFsHandleResolver(fn: FsHandleResolver) {
+  resolveFsHandle = fn;
+}
+
+/** Serve a file with HTTP Range (206 Partial Content) support for zero-copy <video>/<audio> streaming. */
+async function serveStreamableFile(file: string, rangeHeader: string | null): Promise<Response> {
+  const st = await fs.promises.stat(file);
+  const ext = path.extname(file).toLowerCase();
+  const contentType = MIME[ext] ?? "application/octet-stream";
+
+  if (rangeHeader && /^bytes=\d*-\d*$/.test(rangeHeader.trim())) {
+    const [startStr, endStr] = rangeHeader.trim().slice(6).split("-");
+    const start = startStr ? parseInt(startStr, 10) : 0;
+    const requestedEnd = endStr ? parseInt(endStr, 10) : st.size - 1;
+    const end = Math.min(requestedEnd, st.size - 1);
+    if (start >= 0 && start <= end && start < st.size) {
+      const length = end - start + 1;
+      const webStream = Readable.toWeb(fs.createReadStream(file, { start, end })) as unknown as ReadableStream;
+      return new Response(webStream, {
+        status: 206,
+        headers: {
+          "content-type": contentType,
+          "content-range": `bytes ${start}-${end}/${st.size}`,
+          "accept-ranges": "bytes",
+          "content-length": String(length),
+          "content-security-policy": BLOCK_CSP,
+          "x-content-type-options": "nosniff",
+          "cache-control": "no-store",
+        },
+      });
+    }
+  }
+
+  const webStream = Readable.toWeb(fs.createReadStream(file)) as unknown as ReadableStream;
+  return new Response(webStream, {
+    status: 200,
+    headers: {
+      "content-type": contentType,
+      "accept-ranges": "bytes",
+      "content-length": String(st.size),
+      "content-security-policy": BLOCK_CSP,
+      "x-content-type-options": "nosniff",
+      "cache-control": "no-store",
+    },
+  });
+}
+
+function isHardwarePermAllowed(codeDir: string, perm: string, details?: { mediaTypes?: ("video" | "audio")[] }): boolean {
+  const { manifest } = readManifest(codeDir);
+  if (!manifest) return false;
+  const p = effectivePermissions(manifest);
+  if (perm === "media") {
+    const types = details?.mediaTypes;
+    if (types && types.length > 0) {
+      return types.every((t) => (t === "video" ? p.camera : t === "audio" ? p.microphone : false));
+    }
+    return Boolean(p.camera || p.microphone);
+  }
+  if (perm === "midi" || perm === "midiSysex") return Boolean(p.midi);
+  if (perm === "notifications") return Boolean(p.notifications);
+  return false;
+}
+
 /**
  * Configure (once) the isolated session for a block. `codeDir` is updated in `sessionDirs`
  * and looked up dynamically on every request so recreated blocks or validation runs never use a stale path.
@@ -106,18 +172,35 @@ export function blockSession(partition: string, blockId: string, codeDir: string
     const url = new URL(req.url);
     if (url.host !== active.blockId) return new Response("Forbidden: other block", { status: 403 });
     let rel = decodeURIComponent(url.pathname);
+
+    // Virtual zero-copy streaming route for user-picked bb.fs file handles: block://<id>/__fs__/<handle>
+    if (rel.startsWith("/__fs__/")) {
+      const handleId = rel.slice("/__fs__/".length).split("/")[0];
+      const realPath = resolveFsHandle(active.blockId, handleId);
+      if (!realPath || !fs.existsSync(realPath)) return new Response("File handle not found", { status: 404 });
+      try {
+        return await serveStreamableFile(realPath, req.headers.get("range"));
+      } catch {
+        return new Response("Could not stream file", { status: 500 });
+      }
+    }
+
     if (rel.split("/").some((seg) => seg.startsWith(".") && seg !== ".bin")) return new Response("Forbidden", { status: 403 });
     let file = safeJoin(active.codeDir, rel);
     if (!file) return new Response("Forbidden", { status: 403 });
     try {
       if (fs.statSync(file).isDirectory()) file = path.join(file, "index.html");
       const ext = path.extname(file).toLowerCase();
+      if (req.headers.get("range") && /\.(mp4|webm|mov|mp3|wav|ogg)$/i.test(ext)) {
+        return await serveStreamableFile(file, req.headers.get("range"));
+      }
       const raw = await fs.promises.readFile(file);
       const body = ext === ".ts" && typeof stripTypeScriptTypes === "function" ? Buffer.from(stripTypeScriptTypes(raw.toString("utf8")), "utf8") : raw;
       return new Response(body, {
         status: 200,
         headers: {
           "content-type": MIME[ext] ?? "application/octet-stream",
+          "accept-ranges": "bytes",
           "content-security-policy": BLOCK_CSP,
           "x-content-type-options": "nosniff",
           "cache-control": "no-store",
@@ -137,9 +220,15 @@ export function blockSession(partition: string, blockId: string, codeDir: string
     cb({ cancel: !allowed });
   });
 
-  // No camera, mic, geolocation, notifications, HID, etc. Those would come later as declared permissions.
-  ses.setPermissionRequestHandler((_wc, _perm, cb) => cb(false));
-  ses.setPermissionCheckHandler(() => false);
+  // Check declared hardware permissions (camera, microphone, midi, notifications) in block.json.
+  ses.setPermissionRequestHandler((_wc, perm, cb, details) => {
+    const active = sessionDirs.get(partition) ?? { blockId, codeDir };
+    cb(isHardwarePermAllowed(active.codeDir, perm, details as { mediaTypes?: ("video" | "audio")[] }));
+  });
+  ses.setPermissionCheckHandler((_wc, perm) => {
+    const active = sessionDirs.get(partition) ?? { blockId, codeDir };
+    return isHardwarePermAllowed(active.codeDir, perm);
+  });
   ses.setDevicePermissionHandler(() => false);
   ses.on("will-download", (e) => e.preventDefault());
   return ses;

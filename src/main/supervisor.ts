@@ -59,7 +59,13 @@ function backendEnv(blockId: string, codeDir: string, dataDir: string, port?: nu
   const keep = ["HOME", "USER", "LOGNAME", "SHELL", "LANG", "LC_ALL", "TMPDIR", "TEMP", "TMP", "SYSTEMROOT", "WINDIR", "__CF_USER_TEXT_ENCODING"];
   const env: NodeJS.ProcessEnv = {};
   for (const k of keep) if (process.env[k]) env[k] = process.env[k];
-  env.PATH = userPath();
+  const venvBin = path.join(codeDir, ".bin", "venv", process.platform === "win32" ? "Scripts" : "bin");
+  const npmBin = path.join(codeDir, ".bin", "npm", "node_modules", ".bin");
+  const npmMods = path.join(codeDir, ".bin", "npm", "node_modules");
+  const extraPaths = [fs.existsSync(venvBin) ? venvBin : "", fs.existsSync(npmBin) ? npmBin : ""].filter(Boolean);
+  env.PATH = [...extraPaths, userPath()].join(path.delimiter);
+  if (fs.existsSync(venvBin)) env.VIRTUAL_ENV = path.join(codeDir, ".bin", "venv");
+  if (fs.existsSync(npmMods)) env.NODE_PATH = npmMods;
   env.PYTHONUNBUFFERED = "1";
   env.PYTHONDONTWRITEBYTECODE = "1";
   env.NO_COLOR = "1";
@@ -70,13 +76,97 @@ function backendEnv(blockId: string, codeDir: string, dataDir: string, port?: nu
   return env;
 }
 
-function parseCommand(cmd: string | string[]): { bin: string; args: string[]; shell: boolean } {
+function parseCommand(cmd: string | string[], codeDir?: string): { bin: string; args: string[]; shell: boolean } {
   if (Array.isArray(cmd)) {
     const [first, ...rest] = cmd;
+    if (codeDir && !first.includes("/") && !first.includes("\\")) {
+      const venvBin = path.join(codeDir, ".bin", "venv", process.platform === "win32" ? "Scripts" : "bin", first);
+      if (fs.existsSync(venvBin)) return { bin: venvBin, args: rest, shell: false };
+      const npmBin = path.join(codeDir, ".bin", "npm", "node_modules", ".bin", first);
+      if (fs.existsSync(npmBin)) return { bin: npmBin, args: rest, shell: false };
+    }
     const resolved = (!first.includes("/") && !first.includes("\\") && findBinary(first)) || first;
     return { bin: resolved, args: rest, shell: false };
   }
   return { bin: cmd, args: [], shell: true };
+}
+
+function execStep(bin: string, args: string[], cwd: string, env: NodeJS.ProcessEnv, label: string): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const child = spawn(bin, args, { cwd, env, stdio: ["ignore", "pipe", "pipe"] });
+    let out = "";
+    child.stdout?.on("data", (d) => (out += d.toString()));
+    child.stderr?.on("data", (d) => (out += d.toString()));
+    const timer = setTimeout(() => {
+      try {
+        child.kill("SIGKILL");
+      } catch {}
+      reject(new Error(`${label} timed out after 180s`));
+    }, 180000);
+    child.on("error", (err) => {
+      clearTimeout(timer);
+      reject(new Error(`${label} failed to start (${bin}): ${err.message}`));
+    });
+    child.on("close", (code) => {
+      clearTimeout(timer);
+      if (code === 0) resolve();
+      else reject(new Error(`${label} failed (exit ${code}):\n${out.trim().slice(0, 1200)}`));
+    });
+  });
+}
+
+async function installDependencies(
+  blockId: string,
+  codeDir: string,
+  dataDir: string,
+  language: string,
+  deps: string[],
+): Promise<void> {
+  const cleanDeps = deps.map((d) => d.trim()).filter(Boolean);
+  if (!cleanDeps.length) return;
+  const binDir = path.join(codeDir, ".bin");
+  fs.mkdirSync(binDir, { recursive: true });
+  const hashFile = path.join(binDir, ".deps-hash");
+  const wantHash = crypto
+    .createHash("sha256")
+    .update(`${language}:${JSON.stringify([...cleanDeps].sort())}`)
+    .digest("hex")
+    .slice(0, 24);
+
+  const env = backendEnv(blockId, codeDir, dataDir);
+
+  if (language === "python") {
+    const venvDir = path.join(binDir, "venv");
+    const venvPython = path.join(venvDir, process.platform === "win32" ? "Scripts/python.exe" : "bin/python3");
+    if (fs.existsSync(venvPython) && fs.existsSync(hashFile) && fs.readFileSync(hashFile, "utf8").trim() === wantHash) {
+      return;
+    }
+    logFn(blockId, "info", `Installing Python dependencies (${cleanDeps.join(", ")})…`);
+    const uvBin = findBinary("uv");
+    if (uvBin) {
+      if (!fs.existsSync(venvPython)) await execStep(uvBin, ["venv", venvDir], codeDir, env, "uv venv");
+      await execStep(uvBin, ["pip", "install", "--python", venvPython, ...cleanDeps], codeDir, env, "uv pip install");
+    } else {
+      const pyBin = findBinary("python3") || findBinary("python") || "python3";
+      if (!fs.existsSync(venvPython)) await execStep(pyBin, ["-m", "venv", venvDir], codeDir, env, "python3 -m venv");
+      await execStep(venvPython, ["-m", "pip", "install", "--disable-pip-version-check", "-q", ...cleanDeps], codeDir, env, "pip install");
+    }
+    fs.writeFileSync(hashFile, wantHash);
+    return;
+  }
+
+  if (language === "node") {
+    const npmDir = path.join(binDir, "npm");
+    const nmDir = path.join(npmDir, "node_modules");
+    if (fs.existsSync(nmDir) && fs.existsSync(hashFile) && fs.readFileSync(hashFile, "utf8").trim() === wantHash) {
+      return;
+    }
+    logFn(blockId, "info", `Installing Node.js dependencies (${cleanDeps.join(", ")})…`);
+    fs.mkdirSync(npmDir, { recursive: true });
+    const npmBin = findBinary("npm") || "npm";
+    await execStep(npmBin, ["install", "--prefix", npmDir, "--no-save", "--no-audit", "--no-fund", ...cleanDeps], codeDir, env, "npm install");
+    fs.writeFileSync(hashFile, wantHash);
+  }
 }
 
 /** Hash source files in `codeDir` + build command so compiled languages (Swift, Rust, C++, Go) only recompile when changed. */
@@ -106,7 +196,7 @@ async function runBuildStep(blockId: string, codeDir: string, dataDir: string, b
   const currentHash = computeBuildHash(codeDir, buildCmd);
 
   // Check if all target files inside .bin already exist and match the source hash
-  const existingBins = fs.readdirSync(binDir).filter((f) => !f.startsWith("."));
+  const existingBins = fs.readdirSync(binDir).filter((f) => !f.startsWith(".") && f !== "venv" && f !== "npm");
   if (existingBins.length > 0 && fs.existsSync(hashFile) && fs.readFileSync(hashFile, "utf8").trim() === currentHash) {
     return;
   }
@@ -225,6 +315,9 @@ export async function ensureBackend(opts: {
 
   inst.ready = (async () => {
     fs.mkdirSync(path.join(opts.dataDir, "files"), { recursive: true });
+    if (backend.dependencies && backend.dependencies.length > 0) {
+      await installDependencies(opts.blockId, opts.codeDir, opts.dataDir, backend.language, backend.dependencies);
+    }
     if (backend.build) {
       await runBuildStep(opts.blockId, opts.codeDir, opts.dataDir, backend.build);
     }
@@ -234,7 +327,7 @@ export async function ensureBackend(opts: {
       inst.port = await getFreePort();
     }
 
-    const { bin, args, shell } = parseCommand(backend.run);
+    const { bin, args, shell } = parseCommand(backend.run, opts.codeDir);
     const resolvedBin =
       !shell && (bin.startsWith("./") || bin.startsWith(".bin/"))
         ? path.join(opts.codeDir, bin)

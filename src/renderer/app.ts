@@ -115,6 +115,12 @@ const PERM_CHIPS: [RegExp, string, string][] = [
   [/^Read and write files/, "Files", ICONS.file],
   [/^Connect/, "Network", ICONS.globe],
   [/clipboard/, "Clipboard", ICONS.clipboard],
+  [/camera/i, "Camera", ICONS.image],
+  [/microphone/i, "Mic", ICONS.bolt],
+  [/MIDI/i, "MIDI", ICONS.bolt],
+  [/notifications/i, "Alerts", ICONS.sparkle],
+  [/background/i, "Background", ICONS.history],
+  [/bb\.ai/i, "AI", ICONS.sparkle],
 ];
 
 function toast(msg: string, kind: "info" | "err" = "info") {

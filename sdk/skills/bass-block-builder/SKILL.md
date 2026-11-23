@@ -82,13 +82,19 @@ For compiled backends (Swift, Rust, C++, Go), add `"build"` so BASS BLOCK compil
 - **Rust**: `"build": ["rustc", "-O", "backend/main.rs", "-o", ".bin/server"]`, `"run": [".bin/server"]`
 - **Node.js**: `"run": ["node", "backend/main.js"]`
 
+If a Python or Node.js backend needs third-party packages, list them in `"dependencies"` inside `"backend"` (for example `"dependencies": ["pillow", "numpy"]`). BASS BLOCK automatically installs them into an isolated environment in `code/.bin/` before starting the backend.
+
 ### Manifest Rules
 - `id` must stay exactly as given (it matches the folder). Never change it.
 - Bump `version` (patch) whenever you change a block.
 - **Permissions: declare the minimum.** The user approves them before the block opens, and is asked again if they change.
-  - `"fs": "user-picked-files"`: needed for `bb.fs.*` (open/save files and directory pickers). Drag-and-drop of files into the page needs no permission.
+  - `"fs": "user-picked-files"`: needed for `bb.fs.*` (open/save files, directory pickers, streaming URLs, and backend file paths). Drag-and-drop of files into the page needs no permission.
   - `"network"`: `false` (default), or a list of hostnames like `["api.github.com"]`, or `true` for any HTTPS host. Only needed for `bb.net.fetch`.
   - `"clipboard": true`: needed for `bb.clipboard.*`.
+  - `"ai": true`: needed for `bb.ai.complete()` and `bb.ai.chat()` (reuses the user's linked AI model in BASS BLOCK).
+  - `"camera": true`, `"microphone": true`, `"midi": true`: needed for `navigator.mediaDevices.getUserMedia` or WebMIDI.
+  - `"notifications": true`: needed for `bb.notify()`.
+  - `"background": true`: allows the block to keep running in the background while other blocks are active.
 
 ## Polyglot Backend Protocol (`stdio` and `http`)
 
@@ -154,6 +160,8 @@ const files = await bb.fs.pickOpen({
 await bb.fs.read(files[0].handle)              // → Uint8Array
 await bb.fs.readText(files[0].handle)          // → string
 await bb.fs.write(files[0].handle, data)       // works when opened with writable: true or via pickSave()
+const streamUrl = await bb.fs.url(files[0].handle)   // → block://<id>/__fs__/<handle> (zero-copy byte-range streaming for <video>/<audio>/<img>)
+const diskPath = await bb.fs.path(files[0].handle)   // → real OS path to pass to your polyglot backend (FFmpeg/Python/Swift)
 const out = await bb.fs.pickSave({ suggestedName: "result.png" })   // → { handle, name } or null
 await bb.fs.write(out.handle, uint8ArrayOrString)
 
@@ -166,8 +174,15 @@ await bb.fs.writeDirFile(dir.handle, "output/result.json", "{}")
 
 // Polyglot Backend Bridge — requires "mode": "polyglot" and "backend" in block.json
 const result = await bb.backend.call("analyze", { text: "hello" })  // for "protocol": "stdio"
-const offEvt = bb.backend.onEvent("progress", (data) => {})         // push events from backend
+const offEvt = bb.backend.onEvent("progress", (data) => {})         // push events (or live viewport frames) from backend
 const resp = await bb.backend.fetch("/api/run", { method: "POST", body: "{}" }) // for "protocol": "http"
+
+// In-Block AI — needs "ai": true (uses the AI agent/model linked in BASS BLOCK)
+const summary = await bb.ai.complete("Summarize: ...", { system: "Be concise." })
+const reply = await bb.ai.chat([{ role: "user", content: "Hello" }])
+
+// Desktop Notifications — needs "notifications": true
+await bb.notify({ title: "Render Complete", body: "Exported 120 frames." })
 
 // Clipboard — needs "clipboard": true
 await bb.clipboard.readText()
@@ -177,7 +192,7 @@ await bb.clipboard.writeText("hi")
 const res = await bb.net.fetch("https://api.example.com/x", { method: "GET", headers: {} })
 res.status; res.ok; res.headers; res.text(); res.json(); res.bytes()   // (these three are sync)
 
-// Events between open blocks (works great with Split View!)
+// Events between open blocks (binary-safe: Uint8Array & ArrayBuffer transfer without corruption!)
 bb.emit("stats", { words: 120 })                 // to every other open block
 const off = bb.on("text", (data, { from }) => {})  // returns an unsubscribe function
 ```
