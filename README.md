@@ -5,7 +5,15 @@ One host app for AI-generated mini-apps called **blocks**. Describe a tool, your
 
 Status: **Phase 2: Web & Polyglot Blocks (Python, Swift, Rust, C++, Go, Node.js, TypeScript/WebGL).**
 
-## Get Started (Clone & Run)
+## Download Installers (macOS `.dmg` & Windows `.exe`)
+
+Pre-built installers are available on the [**GitHub Releases page**](https://github.com/issa237/BASS-BLOCK/releases/latest):
+
+- **macOS (Apple Silicon `.dmg`)**: [`BASS-BLOCK-0.1.0-arm64.dmg`](https://github.com/issa237/BASS-BLOCK/releases/download/v0.1.0/BASS-BLOCK-0.1.0-arm64.dmg)
+- **macOS (Apple Silicon `.zip`)**: [`BASS-BLOCK-0.1.0-arm64.zip`](https://github.com/issa237/BASS-BLOCK/releases/download/v0.1.0/BASS-BLOCK-0.1.0-arm64.zip)
+- **Windows (64-bit `.exe` Installer)**: [`BASS-BLOCK-0.1.0-x64.exe`](https://github.com/issa237/BASS-BLOCK/releases/download/v0.1.0/BASS-BLOCK-0.1.0-x64.exe)
+
+## Get Started from Source (Clone & Run)
 
 ```bash
 git clone https://github.com/issa237/BASS-BLOCK.git
